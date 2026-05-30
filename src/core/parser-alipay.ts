@@ -122,6 +122,7 @@ export async function parseAlipayCsv(
       merchant_order_id: merchantOrderId,
       remark: remark || undefined,
       reconcile_status: isRefund ? 'unmatched' : 'matched',
+      is_hidden: 0,
     });
   }
 

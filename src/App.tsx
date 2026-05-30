@@ -6,6 +6,7 @@ import { Ledger } from './components/Ledger';
 import { Reconcile } from './components/Reconcile';
 import { ImportPage } from './components/ImportPage';
 import { ExportPage } from './components/ExportPage';
+import { SettingsPage } from './components/SettingsPage';
 
 export default function App() {
   const [activePage, setActivePage] = useState<ActivePage>('dashboard');
@@ -17,6 +18,7 @@ export default function App() {
       case 'reconcile': return <Reconcile />;
       case 'import': return <ImportPage />;
       case 'export': return <ExportPage />;
+      case 'settings': return <SettingsPage />;
       default: return <Dashboard />;
     }
   };

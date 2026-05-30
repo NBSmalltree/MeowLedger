@@ -11,6 +11,7 @@ const navItems: { key: ActivePage; icon: string; label: string }[] = [
   { key: 'reconcile', icon: '🔍', label: '对账分析' },
   { key: 'import', icon: '📥', label: '数据导入' },
   { key: 'export', icon: '📤', label: '数据导出' },
+  { key: 'settings', icon: '⚙️', label: '设置' },
 ];
 
 export function Sidebar({ activePage, onNavigate }: SidebarProps) {

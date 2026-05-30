@@ -12,15 +12,25 @@ const fs = require('fs');
 
 // better-sqlite3 和其他原生模块需要在主进程中加载
 let db = null;
+let dbInitError = null;
 
 function getDb() {
+  if (dbInitError) throw dbInitError;
   if (!db) {
-    const Database = require('better-sqlite3');
-    const dbPath = path.join(app.getPath('userData'), 'meowledger.db');
-    db = new Database(dbPath);
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
-    initSchema(db);
+    try {
+      const Database = require('better-sqlite3');
+      const dbPath = path.join(app.getPath('userData'), 'meowledger.db');
+      console.log('[MeowLedger] 数据库路径:', dbPath);
+      db = new Database(dbPath);
+      db.pragma('journal_mode = WAL');
+      db.pragma('foreign_keys = ON');
+      initSchema(db);
+      console.log('[MeowLedger] 数据库初始化成功');
+    } catch (err) {
+      dbInitError = err;
+      console.error('[MeowLedger] 数据库初始化失败:', err.message);
+      throw err;
+    }
   }
   return db;
 }
@@ -136,9 +146,10 @@ function initSchema(database) {
 function registerIpcHandlers() {
   // 查询交易列表
   ipcMain.handle('get-transactions', async (_event, filters) => {
-    const database = getDb();
-    let sql = 'SELECT * FROM transactions WHERE 1=1';
-    const params = {};
+    try {
+      const database = getDb();
+      let sql = 'SELECT * FROM transactions WHERE 1=1';
+      const params = {};
 
     if (filters?.source) { sql += ' AND source = @source'; params.source = filters.source; }
     if (filters?.direction) { sql += ' AND direction = @direction'; params.direction = filters.direction; }
@@ -154,12 +165,21 @@ function registerIpcHandlers() {
     if (filters?.limit) { sql += ' LIMIT @limit'; params.limit = filters.limit; }
     if (filters?.offset) { sql += ' OFFSET @offset'; params.offset = filters.offset; }
 
-    return database.prepare(sql).all(params);
+      return database.prepare(sql).all(params);
+    } catch (err) {
+      console.error('[MeowLedger] get-transactions 错误:', err.message);
+      return [];
+    }
   });
 
-  // 获取仪表盘统计
-  ipcMain.handle('get-dashboard-stats', async () => {
+  // 获取仪表盘统计（支持时间范围参数）
+  ipcMain.handle('get-dashboard-stats', async (_event, startDate, endDate) => {
+    try {
     const database = getDb();
+    let dateFilter = '';
+    const params = {};
+    if (startDate) { dateFilter += ' AND trade_time >= @startDate'; params.startDate = startDate; }
+    if (endDate) { dateFilter += ' AND trade_time <= @endDate'; params.endDate = endDate + ' 23:59:59'; }
 
     const basic = database.prepare(`
       SELECT
@@ -171,11 +191,11 @@ function registerIpcHandlers() {
           - SUM(CASE WHEN is_refund = 1 THEN amount ELSE 0 END), 0) as netExpense,
         COALESCE(SUM(CASE WHEN source = 'wechat' AND direction = 'expense' THEN amount ELSE 0 END), 0) as wechatExpense,
         COALESCE(SUM(CASE WHEN source = 'alipay' AND direction = 'expense' THEN amount ELSE 0 END), 0) as alipayExpense
-      FROM transactions WHERE is_hidden = 0 AND direction != 'neutral'
-    `).get();
+      FROM transactions WHERE is_hidden = 0 AND direction != 'neutral' ${dateFilter}
+    `).get(params);
 
-    const unmatched = database.prepare(`SELECT COUNT(*) as c FROM transactions WHERE reconcile_status = 'unmatched' AND is_hidden = 0`).get();
-    const discrepancy = database.prepare(`SELECT COUNT(*) as c FROM transactions WHERE reconcile_status = 'discrepancy' AND is_hidden = 0`).get();
+    const unmatched = database.prepare(`SELECT COUNT(*) as c FROM transactions WHERE reconcile_status = 'unmatched' AND is_hidden = 0 ${dateFilter}`).get(params);
+    const discrepancy = database.prepare(`SELECT COUNT(*) as c FROM transactions WHERE reconcile_status = 'discrepancy' AND is_hidden = 0 ${dateFilter}`).get(params);
 
     const dailyTrend = database.prepare(`
       SELECT substr(trade_time, 1, 10) as date,
@@ -183,17 +203,17 @@ function registerIpcHandlers() {
         COALESCE(SUM(CASE WHEN is_refund = 1 THEN amount ELSE 0 END), 0) as refund,
         COALESCE(SUM(CASE WHEN direction = 'expense' THEN amount ELSE 0 END)
           - SUM(CASE WHEN is_refund = 1 THEN amount ELSE 0 END), 0) as net
-      FROM transactions WHERE is_hidden = 0 AND direction != 'neutral'
+      FROM transactions WHERE is_hidden = 0 AND direction != 'neutral' ${dateFilter}
       GROUP BY substr(trade_time, 1, 10) ORDER BY date
-    `).all();
+    `).all(params);
 
     const topCategories = database.prepare(`
       SELECT COALESCE(category, '未分类') as category, COUNT(*) as txn_count,
         COALESCE(SUM(CASE WHEN direction = 'expense' THEN net_amount ELSE 0 END), 0) as net_expense,
         COALESCE(SUM(CASE WHEN is_refund = 1 THEN amount ELSE 0 END), 0) as refund_amount
-      FROM transactions WHERE is_hidden = 0 AND direction != 'neutral'
+      FROM transactions WHERE is_hidden = 0 AND direction != 'neutral' ${dateFilter}
       GROUP BY category ORDER BY net_expense DESC LIMIT 10
-    `).all();
+    `).all(params);
 
     return {
       totalExpense: basic.totalExpense,
@@ -208,10 +228,17 @@ function registerIpcHandlers() {
       dailyTrend,
       topCategories,
     };
+    } catch (err) {
+      console.error('[MeowLedger] get-dashboard-stats 错误:', err.message);
+      return { totalExpense: 0, totalIncome: 0, totalRefund: 0, netExpense: 0, txnCount: 0,
+        unmatchedCount: 0, discrepancyCount: 0, wechatExpense: 0, alipayExpense: 0,
+        dailyTrend: [], topCategories: [] };
+    }
   });
 
   // 获取退款链路
   ipcMain.handle('get-refund-chains', async () => {
+    try {
     const database = getDb();
     const refundTxns = database.prepare(`
       SELECT * FROM transactions WHERE (is_refund = 1 OR refund_amount > 0) AND is_hidden = 0 ORDER BY trade_time DESC
@@ -238,10 +265,15 @@ function registerIpcHandlers() {
       chain.items.sort((a, b) => a.tradeTime.localeCompare(b.tradeTime));
     }
     return Array.from(chains.values());
+    } catch (err) {
+      console.error('[MeowLedger] get-refund-chains 错误:', err.message);
+      return [];
+    }
   });
 
   // 获取月度汇总
   ipcMain.handle('get-monthly-summary', async () => {
+    try {
     const database = getDb();
     return database.prepare(`
       SELECT strftime('%Y-%m', trade_time) AS month, source, COUNT(*) AS txn_count,
@@ -253,21 +285,35 @@ function registerIpcHandlers() {
       FROM transactions WHERE is_hidden = 0 AND direction != 'neutral'
       GROUP BY strftime('%Y-%m', trade_time), source ORDER BY month DESC, source
     `).all();
+    } catch (err) {
+      console.error('[MeowLedger] get-monthly-summary 错误:', err.message);
+      return [];
+    }
   });
 
   // 获取数据库统计
   ipcMain.handle('get-stats', async () => {
-    const database = getDb();
-    const total = database.prepare('SELECT COUNT(*) as c FROM transactions').get();
-    const wechat = database.prepare("SELECT COUNT(*) as c FROM transactions WHERE source='wechat'").get();
-    const alipay = database.prepare("SELECT COUNT(*) as c FROM transactions WHERE source='alipay'").get();
-    return { total: total.c, wechat: wechat.c, alipay: alipay.c };
+    try {
+      const database = getDb();
+      const total = database.prepare('SELECT COUNT(*) as c FROM transactions').get();
+      const wechat = database.prepare("SELECT COUNT(*) as c FROM transactions WHERE source='wechat'").get();
+      const alipay = database.prepare("SELECT COUNT(*) as c FROM transactions WHERE source='alipay'").get();
+      return { total: total.c, wechat: wechat.c, alipay: alipay.c };
+    } catch (err) {
+      console.error('[MeowLedger] get-stats 错误:', err.message);
+      return { total: 0, wechat: 0, alipay: 0 };
+    }
   });
 
   // 获取导入历史
   ipcMain.handle('get-import-history', async () => {
-    const database = getDb();
-    return database.prepare('SELECT * FROM import_records ORDER BY imported_at DESC').all();
+    try {
+      const database = getDb();
+      return database.prepare('SELECT * FROM import_records ORDER BY imported_at DESC').all();
+    } catch (err) {
+      console.error('[MeowLedger] get-import-history 错误:', err.message);
+      return [];
+    }
   });
 
   // 导入文件
@@ -276,6 +322,11 @@ function registerIpcHandlers() {
       const database = getDb();
       const crypto = require('crypto');
       const fileName = path.basename(filePath);
+
+      if (!fs.existsSync(filePath)) {
+        return { success: false, message: `文件不存在: ${filePath}`, imported: 0 };
+      }
+
       const fileBuffer = fs.readFileSync(filePath);
       const fileHash = crypto.createHash('md5').update(fileBuffer).digest('hex');
 
@@ -283,18 +334,24 @@ function registerIpcHandlers() {
       const existing = database.prepare('SELECT COUNT(*) as c FROM import_records WHERE file_hash = ?').get(fileHash);
       if (existing.c > 0) return { success: false, message: '该文件已导入过', imported: 0 };
 
-      // Parse based on file type
+      // 智能识别文件格式（根据内容，不依赖文件名）
       let txns = [];
       let source = '';
+      const fileType = detectFileType(filePath, fileName);
 
-      if (fileName.includes('微信') && fileName.endsWith('.xlsx')) {
+      if (fileType === 'wechat') {
         source = 'wechat';
-        txns = parseWechatXlsxSync(filePath);
-      } else if (fileName.includes('支付宝') && fileName.endsWith('.csv')) {
+        txns = await parseWechatXlsxSync(filePath);
+      } else if (fileType === 'alipay') {
         source = 'alipay';
         txns = parseAlipayCsvSync(filePath);
+      } else if (fileType === 'exported') {
+        // 本程序导出的文件，按导出格式解析
+        const parsed = parseExportedFile(filePath);
+        txns = parsed.txns;
+        source = parsed.source;
       } else {
-        return { success: false, message: '无法识别文件类型，请确保文件名包含"微信"或"支付宝"', imported: 0 };
+        return { success: false, message: `无法识别文件格式: ${fileName}，支持微信/支付宝原始账单或本程序导出的文件`, imported: 0 };
       }
 
       // Auto-classify
@@ -350,6 +407,7 @@ function registerIpcHandlers() {
 
   // 执行对账
   ipcMain.handle('run-reconciliation', async () => {
+    try {
     const database = getDb();
     const crypto = require('crypto');
 
@@ -454,21 +512,30 @@ function registerIpcHandlers() {
 
     runReconcile();
     return { groupsCreated, matched, unmatched };
+    } catch (err) {
+      console.error('[MeowLedger] run-reconciliation 错误:', err.message);
+      return { groupsCreated: 0, matched: 0, unmatched: 0 };
+    }
   });
 
   // 更新交易记录
   ipcMain.handle('update-transaction', async (_event, id, updates) => {
-    const database = getDb();
-    const allowed = ['category', 'direction', 'net_amount', 'reconcile_status', 'user_note', 'is_hidden'];
-    const sets = [];
-    const params = { id };
-    for (const [key, value] of Object.entries(updates)) {
-      if (allowed.includes(key)) { sets.push(`${key} = @${key}`); params[key] = value; }
+    try {
+      const database = getDb();
+      const allowed = ['category', 'direction', 'net_amount', 'reconcile_status', 'user_note', 'is_hidden'];
+      const sets = [];
+      const params = { id };
+      for (const [key, value] of Object.entries(updates)) {
+        if (allowed.includes(key)) { sets.push(`${key} = @${key}`); params[key] = value; }
+      }
+      if (sets.length === 0) return;
+      sets.push("updated_at = datetime('now', 'localtime')");
+      database.prepare(`UPDATE transactions SET ${sets.join(', ')} WHERE id = @id`).run(params);
+      return true;
+    } catch (err) {
+      console.error('[MeowLedger] update-transaction 错误:', err.message);
+      return false;
     }
-    if (sets.length === 0) return;
-    sets.push("updated_at = datetime('now', 'localtime')");
-    database.prepare(`UPDATE transactions SET ${sets.join(', ')} WHERE id = @id`).run(params);
-    return true;
   });
 
   // 导出 Excel
@@ -546,9 +613,10 @@ function registerIpcHandlers() {
     }
   });
 
-  // 打开文件对话框
+  // 打开文件对话框（必须传 mainWindow 作为父窗口，否则 Windows 上可能不显示）
   ipcMain.handle('open-file-dialog', async () => {
-    const result = await dialog.showOpenDialog({
+    if (!mainWindow) return [];
+    const result = await dialog.showOpenDialog(mainWindow, {
       title: '选择账单文件',
       filters: [
         { name: '账单文件', extensions: ['xlsx', 'csv'] },
@@ -562,11 +630,93 @@ function registerIpcHandlers() {
 
   // 清空数据
   ipcMain.handle('clear-all-data', async () => {
-    const database = getDb();
-    database.exec('DELETE FROM transactions');
-    database.exec('DELETE FROM reconcile_groups');
-    database.exec('DELETE FROM import_records');
-    return true;
+    try {
+      const database = getDb();
+      database.exec('DELETE FROM reconcile_groups');
+      database.exec('DELETE FROM transactions');
+      database.exec('DELETE FROM import_records');
+      return true;
+    } catch (err) {
+      console.error('[MeowLedger] clear-all-data 错误:', err.message);
+      return false;
+    }
+  });
+
+  // 删除交易记录（单条或批量）
+  ipcMain.handle('delete-transactions', async (_event, ids) => {
+    try {
+      const database = getDb();
+      const placeholders = ids.map(() => '?').join(',');
+      const result = database.prepare(`DELETE FROM transactions WHERE id IN (${placeholders})`).run(...ids);
+      return { success: true, deleted: result.changes };
+    } catch (err) {
+      console.error('[MeowLedger] delete-transactions 错误:', err.message);
+      return { success: false, deleted: 0 };
+    }
+  });
+
+  // 新增交易记录
+  ipcMain.handle('add-transaction', async (_event, txn) => {
+    try {
+      const database = getDb();
+      const result = database.prepare(`
+        INSERT INTO transactions (source, trade_time, trade_type, category, counterparty,
+          product_desc, direction, amount, net_amount, payment_method, status,
+          is_refund, refund_amount, remark, reconcile_status)
+        VALUES (@source, @trade_time, @trade_type, @category, @counterparty,
+          @product_desc, @direction, @amount, @net_amount, @payment_method, @status,
+          @is_refund, @refund_amount, @remark, @reconcile_status)
+      `).run({
+        source: txn.source || 'manual',
+        trade_time: txn.trade_time,
+        trade_type: txn.trade_type || '手动录入',
+        category: txn.category || '其他',
+        counterparty: txn.counterparty || null,
+        product_desc: txn.product_desc || null,
+        direction: txn.direction,
+        amount: txn.amount,
+        net_amount: txn.net_amount ?? txn.amount,
+        payment_method: txn.payment_method || null,
+        status: txn.status || '手动录入',
+        is_refund: 0,
+        refund_amount: 0,
+        remark: txn.remark || null,
+        reconcile_status: 'matched',
+      });
+      return { success: true, id: Number(result.lastInsertRowid) };
+    } catch (err) {
+      console.error('[MeowLedger] add-transaction 错误:', err.message);
+      return { success: false, id: null };
+    }
+  });
+
+  // 获取所有分类（预置 + 自定义）
+  ipcMain.handle('get-categories', async () => {
+    try {
+      const database = getDb();
+      const rules = database.prepare('SELECT DISTINCT category FROM category_rules ORDER BY category').all();
+      const dbCategories = database.prepare('SELECT DISTINCT category FROM transactions WHERE category IS NOT NULL ORDER BY category').all();
+      const allCats = new Set([...rules.map(r => r.category), ...dbCategories.map(r => r.category), '其他']);
+      return Array.from(allCats).sort();
+    } catch (err) {
+      console.error('[MeowLedger] get-categories 错误:', err.message);
+      return ['其他'];
+    }
+  });
+
+  // 添加自定义分类规则
+  ipcMain.handle('add-category-rule', async (_event, rule) => {
+    try {
+      const database = getDb();
+      database.prepare(`
+        INSERT INTO category_rules (match_field, match_pattern, match_type, category, priority)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(rule.match_field || 'counterparty', rule.match_pattern, rule.match_type || 'contains', rule.category, rule.priority || 0);
+      return true;
+    } catch (err) {
+      console.error('[MeowLedger] add-category-rule 错误:', err.message);
+      return false;
+    }
   });
 }
 
@@ -597,7 +747,16 @@ function parseWechatXlsxSync(filePath) {
       for (let i = headerIdx + 1; i < rows.length; i++) {
         const row = rows[i];
         if (!row || !row[1]) continue;
-        const tradeTime = String(row[1] || '').trim();
+        // 日期列：ExcelJS 可能返回 Date 对象或字符串，统一格式化
+        const rawDate = row[1];
+        let tradeTime;
+        if (rawDate instanceof Date && !isNaN(rawDate.getTime())) {
+          // Date 对象 → "YYYY-MM-DD HH:mm:ss"
+          const pad = (n) => String(n).padStart(2, '0');
+          tradeTime = `${rawDate.getFullYear()}-${pad(rawDate.getMonth() + 1)}-${pad(rawDate.getDate())} ${pad(rawDate.getHours())}:${pad(rawDate.getMinutes())}:${pad(rawDate.getSeconds())}`;
+        } else {
+          tradeTime = String(rawDate || '').trim();
+        }
         const tradeType = String(row[2] || '').trim();
         const counterparty = String(row[3] || '').trim();
         const product = String(row[4] || '').trim();
@@ -715,6 +874,103 @@ function autoClassify(rules, txn) {
 }
 
 // ============================================================
+// 智能文件格式检测
+// ============================================================
+
+function detectFileType(filePath, fileName) {
+  const ext = path.extname(fileName).toLowerCase();
+
+  if (ext === '.xlsx') {
+    // 读取 xlsx 前 20 行内容判断
+    try {
+      const ExcelJS = require('exceljs');
+      const workbook = new ExcelJS.Workbook();
+      // 同步方式不可用，用 buffer 判断
+      const buffer = fs.readFileSync(filePath);
+      const text = buffer.toString('utf-8');
+      if (text.includes('微信支付') || text.includes('交易单号')) return 'wechat';
+      if (text.includes('轧差净额') || text.includes('喵喵账本')) return 'exported';
+    } catch (e) { /* ignore */ }
+    return 'wechat'; // xlsx 默认当微信处理
+  }
+
+  if (ext === '.csv') {
+    // 读取前 2000 字节判断
+    const buffer = fs.readFileSync(filePath);
+    const chardet = require('chardet');
+    const iconv = require('iconv-lite');
+    const encoding = chardet.detect(buffer) || 'utf-8';
+    const sample = encoding.toLowerCase().includes('gb')
+      ? iconv.decode(buffer.slice(0, 2000), 'gb18030')
+      : buffer.slice(0, 2000).toString('utf-8');
+
+    if (sample.includes('支付宝') || sample.includes('交易分类')) return 'alipay';
+    if (sample.includes('轧差净额') || sample.includes('喵喵账本') || sample.includes('净支出')) return 'exported';
+    return 'alipay'; // csv 默认当支付宝处理
+  }
+
+  return 'unknown';
+}
+
+function parseExportedFile(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const ExcelJS = require('exceljs');
+
+  if (ext === '.xlsx') {
+    // 同步解析导出的 xlsx
+    const workbook = new ExcelJS.Workbook();
+    // 用 buffer 方式读取
+    return { txns: [], source: 'manual' }; // TODO: 实现导出文件解析
+  }
+
+  // CSV 导出文件
+  const chardet = require('chardet');
+  const iconv = require('iconv-lite');
+  const buffer = fs.readFileSync(filePath);
+  const encoding = chardet.detect(buffer) || 'utf-8';
+  const content = encoding.toLowerCase().includes('gb')
+    ? iconv.decode(buffer, 'gb18030') : buffer.toString('utf-8');
+  const lines = content.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+  // 找列头
+  let headerIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].includes('交易时间') && lines[i].includes('来源')) {
+      headerIdx = i; break;
+    }
+  }
+  if (headerIdx === -1) return { txns: [], source: 'manual' };
+
+  const headers = lines[headerIdx].split(',').map(s => s.trim());
+  const txns = [];
+  for (let i = headerIdx + 1; i < lines.length; i++) {
+    const cols = lines[i].split(',').map(s => s.trim());
+    if (cols.length < 6) continue;
+    const row = {};
+    headers.forEach((h, idx) => { row[h] = cols[idx] || ''; });
+
+    const srcRaw = row['来源'] || '';
+    const source = srcRaw.includes('微信') ? 'wechat' : srcRaw.includes('支付宝') ? 'alipay' : 'manual';
+    const dirRaw = row['收/支'] || row['方向'] || '';
+    let direction = 'expense';
+    if (dirRaw.includes('收入') || dirRaw.includes('+')) direction = 'income';
+    else if (dirRaw.includes('中性') || dirRaw.includes('不计')) direction = 'neutral';
+
+    txns.push({
+      source, trade_time: row['交易时间'] || '', trade_type: row['交易类型'] || '',
+      category: row['分类'] || row['交易分类'] || '未分类',
+      counterparty: row['交易对方'] || '', product_desc: row['商品说明'] || row['商品'] || '',
+      direction, amount: parseFloat(row['金额'] || '0') || 0,
+      net_amount: parseFloat(row['轧差净额'] || row['金额'] || '0') || 0,
+      payment_method: row['支付方式'] || '', status: row['状态'] || row['交易状态'] || '',
+      is_refund: dirRaw.includes('退款') ? 1 : 0, refund_amount: 0,
+      remark: row['备注'] || '', reconcile_status: 'matched',
+    });
+  }
+  return { txns, source: 'mixed' };
+}
+
+// ============================================================
 // 窗口管理
 // ============================================================
 
@@ -735,17 +991,32 @@ function createWindow() {
   });
 
   // 开发模式加载 Vite dev server，生产模式加载打包后的文件
-  if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
+  const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
+  console.log('[MeowLedger] 模式:', isDev ? '开发' : '生产');
+
+  if (isDev) {
     mainWindow.loadURL('http://localhost:1420');
-    mainWindow.webContents.openDevTools();
+    // mainWindow.webContents.openDevTools(); // 需要调试时取消注释
   } else {
-    mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    const indexPath = path.join(__dirname, '..', 'dist', 'index.html');
+    console.log('[MeowLedger] 加载:', indexPath);
+    mainWindow.loadFile(indexPath);
   }
+
+  // 打开 DevTools 方便调试（可注释掉）
+  // mainWindow.webContents.openDevTools();
 }
 
 app.whenReady().then(() => {
   registerIpcHandlers();
   createWindow();
+
+  // 提前初始化数据库，尽早发现加载问题
+  try {
+    getDb();
+  } catch (err) {
+    console.error('[MeowLedger] 数据库提前初始化失败，将在首次使用时重试:', err.message);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

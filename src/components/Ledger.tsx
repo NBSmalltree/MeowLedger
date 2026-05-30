@@ -1,47 +1,106 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { dataService } from '../services/data-service';
 import type { Transaction, Source, Direction } from '../types/index';
 
-const sourceLabels: Record<Source, string> = { wechat: '微信', alipay: '支付宝' };
-const dirLabels: Record<string, string> = { income: '收入', expense: '支出', neutral: '中性', '退款': '退款' };
-const statusIcons: Record<string, string> = {
-  matched: '✅', unmatched: '❌', discrepancy: '⚠️', manual_matched: '🔗',
-};
+const sourceLabels: Record<string, string> = { wechat: '微信', alipay: '支付宝', manual: '手动' };
 
 export function Ledger() {
   const [txns, setTxns] = useState<Transaction[]>([]);
   const [sourceFilter, setSourceFilter] = useState<Source | 'all'>('all');
   const [dirFilter, setDirFilter] = useState<string>('all');
+  const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [search, setSearch] = useState('');
-  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [categories, setCategories] = useState<string[]>([]);
+  const [editingTxn, setEditingTxn] = useState<Transaction | null>(null);
+  const [showAddModal, setShowAddModal] = useState(false);
 
-  useEffect(() => {
-    dataService.getTransactions({
+  const refresh = useCallback(async () => {
+    const data = await dataService.getTransactions({
       source: sourceFilter === 'all' ? undefined : sourceFilter,
       direction: dirFilter === 'all' ? undefined : (dirFilter as Direction),
       search: search || undefined,
-    }).then(setTxns);
-  }, [sourceFilter, dirFilter, search]);
+    });
+    setTxns(categoryFilter === 'all' ? data : data.filter(t => t.category === categoryFilter));
+  }, [sourceFilter, dirFilter, categoryFilter, search]);
 
-  const formatAmount = (txn: Transaction) => {
-    const prefix = txn.is_refund ? '+' : (txn.direction === 'income' ? '+' : txn.direction === 'expense' ? '-' : '');
-    return `${prefix}¥${txn.amount.toFixed(2)}`;
+  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => { dataService.getCategories().then(setCategories); }, []);
+
+  const handleDelete = async (ids: number[]) => {
+    if (ids.length === 0) return;
+    const msg = ids.length === 1 ? '确定删除这条记录？' : `确定删除选中的 ${ids.length} 条记录？`;
+    if (!confirm(msg)) return;
+    await dataService.deleteTransactions(ids);
+    setSelected(new Set());
+    refresh();
   };
 
-  const getAmountColor = (txn: Transaction) => {
-    if (txn.is_refund) return 'text-green-600';
-    return txn.direction === 'income' ? 'text-green-600' : txn.direction === 'expense' ? 'text-gray-900' : 'text-gray-500';
+  const handleBatchDelete = () => handleDelete(Array.from(selected));
+
+  const toggleSelect = (id: number) => {
+    const next = new Set(selected);
+    next.has(id) ? next.delete(id) : next.add(id);
+    setSelected(next);
+  };
+
+  const toggleSelectAll = () => {
+    if (selected.size === txns.length) setSelected(new Set());
+    else setSelected(new Set(txns.map(t => t.id)));
+  };
+
+  const formatTime = (t: string) => {
+    if (!t) return '-';
+    // 兼容多种格式: "2026-05-27 22:23:16", "2026-05-27T22:23", "05-27 22:23"
+    const clean = t.replace('T', ' ');
+    const parts = clean.split(' ');
+    const datePart = parts[0] || '';
+    const timePart = parts[1] || '';
+    // datePart 可能是 "2026-05-27" 或 "05-27"
+    const short = datePart.length >= 10 ? datePart.substring(5) : datePart;
+    return timePart ? `${short} ${timePart.substring(0, 5)}` : short;
+  };
+
+  const dirIcon = (t: Transaction) => {
+    if (t.is_refund) return '↩️';
+    if (t.direction === 'income') return '📈';
+    if (t.direction === 'neutral') return '➖';
+    return '💰';
+  };
+
+  const amountStr = (t: Transaction) => {
+    const sign = t.is_refund ? '+' : t.direction === 'income' ? '+' : t.direction === 'expense' ? '-' : '';
+    return `${sign}¥${t.amount.toFixed(2)}`;
+  };
+
+  const amountColor = (t: Transaction) => {
+    if (t.is_refund) return 'text-green-600';
+    return t.direction === 'income' ? 'text-green-600' : t.direction === 'expense' ? 'text-gray-900' : 'text-gray-400';
   };
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
-      <h2 className="text-2xl font-bold text-gray-900 mb-6">流水明细</h2>
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-2xl font-bold text-gray-900">流水明细</h2>
+        <div className="flex items-center gap-2">
+          {selected.size > 0 && (
+            <button onClick={handleBatchDelete}
+              className="px-3 py-1.5 bg-red-500 text-white text-sm rounded-lg hover:bg-red-600 transition">
+              删除选中 ({selected.size})
+            </button>
+          )}
+          <button onClick={() => setShowAddModal(true)}
+            className="px-3 py-1.5 bg-cat-500 text-white text-sm rounded-lg hover:bg-cat-600 transition">
+            + 手动录入
+          </button>
+        </div>
+      </div>
 
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-3 mb-4">
         <div className="flex bg-gray-100 rounded-lg p-0.5">
-          {(['all', 'wechat', 'alipay'] as const).map(s => (
-            <button key={s} onClick={() => setSourceFilter(s)}
+          {(['all', 'wechat', 'alipay', 'manual'] as const).map(s => (
+            <button key={s} onClick={() => setSourceFilter(s as any)}
               className={`px-3 py-1.5 text-sm rounded-md transition ${sourceFilter === s ? 'bg-white shadow-sm font-medium text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>
               {s === 'all' ? '全部' : sourceLabels[s]}
             </button>
@@ -52,18 +111,20 @@ export function Ledger() {
           {(['all', 'expense', 'income', 'neutral'] as const).map(d => (
             <button key={d} onClick={() => setDirFilter(d)}
               className={`px-3 py-1.5 text-sm rounded-md transition ${dirFilter === d ? 'bg-white shadow-sm font-medium text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>
-              {d === 'all' ? '全部' : dirLabels[d]}
+              {d === 'all' ? '全部' : d === 'expense' ? '支出' : d === 'income' ? '收入' : '中性'}
             </button>
           ))}
         </div>
 
-        <input
-          type="text"
-          placeholder="搜索交易对方/商品..."
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-cat-400 focus:border-transparent w-60"
-        />
+        <select value={categoryFilter} onChange={e => setCategoryFilter(e.target.value)}
+          className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-cat-400">
+          <option value="all">全部分类</option>
+          {categories.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+
+        <input type="text" placeholder="搜索交易对方/商品..."
+          value={search} onChange={e => setSearch(e.target.value)}
+          className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-cat-400 w-52" />
       </div>
 
       {/* Table */}
@@ -71,66 +132,221 @@ export function Ledger() {
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-gray-50 text-left text-gray-500">
-              <th className="px-4 py-3 font-medium">时间</th>
-              <th className="px-4 py-3 font-medium">来源</th>
-              <th className="px-4 py-3 font-medium">交易对方</th>
-              <th className="px-4 py-3 font-medium">商品</th>
-              <th className="px-4 py-3 font-medium text-right">金额</th>
-              <th className="px-4 py-3 font-medium">状态</th>
-              <th className="px-4 py-3 font-medium">对账</th>
+              <th className="px-3 py-3 w-8">
+                <input type="checkbox" checked={txns.length > 0 && selected.size === txns.length}
+                  onChange={toggleSelectAll}
+                  className="w-4 h-4 rounded border-gray-300 text-cat-500" />
+              </th>
+              <th className="px-3 py-3 font-medium w-28">时间</th>
+              <th className="px-3 py-3 font-medium w-20">来源</th>
+              <th className="px-3 py-3 font-medium w-24">分类</th>
+              <th className="px-3 py-3 font-medium">交易对方</th>
+              <th className="px-3 py-3 font-medium">商品</th>
+              <th className="px-3 py-3 font-medium w-24">支付方式</th>
+              <th className="px-3 py-3 font-medium text-right w-24">金额</th>
+              <th className="px-3 py-3 font-medium w-12">状态</th>
+              <th className="px-3 py-3 font-medium w-16">操作</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {txns.map(txn => (
-              <>
-                <tr key={txn.id}
-                  className={`hover:bg-gray-50 cursor-pointer transition ${txn.is_refund ? 'bg-green-50/40' : ''}`}
-                  onClick={() => setExpandedId(expandedId === txn.id ? null : txn.id)}>
-                  <td className="px-4 py-3 text-gray-600 whitespace-nowrap">{txn.trade_time.substring(5, 16)}</td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${txn.source === 'wechat' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
-                      {sourceLabels[txn.source]}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-gray-900 max-w-[180px] truncate">{txn.counterparty || '-'}</td>
-                  <td className="px-4 py-3 text-gray-500 max-w-[200px] truncate">{txn.product_desc || '-'}</td>
-                  <td className={`px-4 py-3 text-right font-mono font-medium whitespace-nowrap ${getAmountColor(txn)}`}>
-                    {formatAmount(txn)}
-                    {txn.refund_amount > 0 && !txn.is_refund && (
-                      <span className="text-xs text-amber-600 block">已退¥{txn.refund_amount.toFixed(2)}</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 text-gray-600 text-xs">{txn.status}</td>
-                  <td className="px-4 py-3">{statusIcons[txn.reconcile_status] || '-'}</td>
-                </tr>
-                {expandedId === txn.id && (
-                  <tr key={`${txn.id}-detail`} className="bg-gray-50">
-                    <td colSpan={7} className="px-4 py-3">
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs text-gray-600">
-                        <div><span className="text-gray-400">交易类型：</span>{txn.trade_type}</div>
-                        <div><span className="text-gray-400">分类：</span>{txn.category || '未分类'}</div>
-                        <div><span className="text-gray-400">支付方式：</span>{txn.payment_method || '-'}</div>
-                        <div><span className="text-gray-400">净额：</span>¥{(txn.net_amount ?? txn.amount).toFixed(2)}</div>
-                        {txn.platform_txn_id && <div><span className="text-gray-400">交易单号：</span><span className="font-mono">{txn.platform_txn_id}</span></div>}
-                        {txn.merchant_txn_id && <div><span className="text-gray-400">商户单号：</span><span className="font-mono">{txn.merchant_txn_id}</span></div>}
-                        {txn.platform_order_id && <div><span className="text-gray-400">订单号：</span><span className="font-mono">{txn.platform_order_id}</span></div>}
-                        {txn.remark && <div className="col-span-2"><span className="text-gray-400">备注：</span>{txn.remark}</div>}
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </>
+              <tr key={txn.id}
+                className={`hover:bg-gray-50 transition ${txn.is_refund ? 'bg-green-50/30' : ''} ${selected.has(txn.id) ? 'bg-blue-50/30' : ''}`}>
+                <td className="px-3 py-2.5">
+                  <input type="checkbox" checked={selected.has(txn.id)} onChange={() => toggleSelect(txn.id)}
+                    className="w-4 h-4 rounded border-gray-300 text-cat-500" />
+                </td>
+                <td className="px-3 py-2.5 text-gray-600 whitespace-nowrap text-xs">{formatTime(txn.trade_time)}</td>
+                <td className="px-3 py-2.5">
+                  <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium whitespace-nowrap ${txn.source === 'wechat' ? 'bg-green-100 text-green-700' : txn.source === 'alipay' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>
+                    {sourceLabels[txn.source] || txn.source}
+                  </span>
+                </td>
+                <td className="px-3 py-2.5 text-xs text-gray-500 max-w-[80px] truncate" title={txn.category}>{txn.category || '-'}</td>
+                <td className="px-3 py-2.5 text-gray-900 max-w-[140px] truncate" title={txn.counterparty}>{txn.counterparty || '-'}</td>
+                <td className="px-3 py-2.5 text-gray-500 max-w-[160px] truncate" title={txn.product_desc}>{txn.product_desc || '-'}</td>
+                <td className="px-3 py-2.5 text-xs text-gray-400 max-w-[100px] truncate" title={txn.payment_method}>{txn.payment_method || '-'}</td>
+                <td className={`px-3 py-2.5 text-right font-mono font-medium whitespace-nowrap ${amountColor(txn)}`}>
+                  {dirIcon(txn)} {amountStr(txn)}
+                  {txn.refund_amount > 0 && !txn.is_refund && (
+                    <div className="text-xs text-amber-500">已退¥{txn.refund_amount.toFixed(2)}</div>
+                  )}
+                </td>
+                <td className="px-3 py-2.5 text-xs text-gray-400">
+                  {txn.reconcile_status === 'matched' ? '✅' : txn.reconcile_status === 'discrepancy' ? '⚠️' : txn.reconcile_status === 'unmatched' ? '❌' : '🔗'}
+                </td>
+                <td className="px-3 py-2.5">
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => setEditingTxn(txn)} title="编辑"
+                      className="p-1 text-gray-400 hover:text-cat-600 rounded transition">✏️</button>
+                    <button onClick={() => handleDelete([txn.id])} title="删除"
+                      className="p-1 text-gray-400 hover:text-red-600 rounded transition">🗑️</button>
+                  </div>
+                </td>
+              </tr>
             ))}
           </tbody>
         </table>
-
-        {txns.length === 0 && (
-          <div className="text-center py-12 text-gray-400">暂无数据</div>
-        )}
+        {txns.length === 0 && <div className="text-center py-12 text-gray-400">暂无数据</div>}
       </div>
 
-      <div className="mt-3 text-sm text-gray-500">
-        共 {txns.length} 条记录 | 支出 ¥{txns.filter(t => t.direction === 'expense').reduce((s, t) => s + t.amount, 0).toFixed(2)}
+      <div className="mt-3 flex items-center justify-between text-sm text-gray-500">
+        <span>共 {txns.length} 条记录</span>
+        <span>支出 ¥{txns.filter(t => t.direction === 'expense').reduce((s, t) => s + t.amount, 0).toFixed(2)} | 退款 ¥{txns.filter(t => t.is_refund).reduce((s, t) => s + t.amount, 0).toFixed(2)}</span>
+      </div>
+
+      {/* Edit Modal */}
+      {editingTxn && <EditModal txn={editingTxn} categories={categories} onClose={() => setEditingTxn(null)}
+        onSave={async (id, updates) => { await dataService.updateTransaction(id, updates); setEditingTxn(null); refresh(); }} />}
+
+      {/* Add Modal */}
+      {showAddModal && <AddModal categories={categories} onClose={() => setShowAddModal(false)}
+        onSave={async (txn) => { await dataService.addTransaction(txn); setShowAddModal(false); refresh(); }} />}
+    </div>
+  );
+}
+
+// ============================================================
+// Edit Modal
+// ============================================================
+
+function EditModal({ txn, categories, onClose, onSave }: {
+  txn: Transaction; categories: string[];
+  onClose: () => void; onSave: (id: number, updates: Partial<Transaction>) => Promise<void>;
+}) {
+  const [form, setForm] = useState({ ...txn });
+  const set = (k: string, v: any) => setForm(prev => ({ ...prev, [k]: v }));
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-white rounded-2xl p-6 w-[520px] max-h-[85vh] overflow-auto shadow-xl" onClick={e => e.stopPropagation()}>
+        <h3 className="text-lg font-bold text-gray-900 mb-4">编辑交易</h3>
+        <div className="space-y-3">
+          <Field label="交易时间">
+            <input type="datetime-local" value={form.trade_time?.replace(' ', 'T')?.substring(0, 16) || ''} onChange={e => set('trade_time', e.target.value.replace('T', ' '))} />
+          </Field>
+          <Field label="交易对方">
+            <input value={form.counterparty || ''} onChange={e => set('counterparty', e.target.value)} />
+          </Field>
+          <Field label="商品说明">
+            <input value={form.product_desc || ''} onChange={e => set('product_desc', e.target.value)} />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="金额">
+              <input type="number" step="0.01" value={form.amount} onChange={e => set('amount', parseFloat(e.target.value) || 0)} />
+            </Field>
+            <Field label="方向">
+              <select value={form.direction} onChange={e => set('direction', e.target.value)}>
+                <option value="expense">支出</option>
+                <option value="income">收入</option>
+                <option value="neutral">中性</option>
+              </select>
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="分类">
+              <select value={form.category || ''} onChange={e => set('category', e.target.value)}>
+                <option value="">未分类</option>
+                {categories.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </Field>
+            <Field label="来源">
+              <select value={form.source} onChange={e => set('source', e.target.value)}>
+                <option value="wechat">微信</option>
+                <option value="alipay">支付宝</option>
+                <option value="manual">手动</option>
+              </select>
+            </Field>
+          </div>
+          <Field label="支付方式">
+            <input value={form.payment_method || ''} onChange={e => set('payment_method', e.target.value)} />
+          </Field>
+          <Field label="备注">
+            <input value={form.remark || ''} onChange={e => set('remark', e.target.value)} />
+          </Field>
+          <Field label="用户备注">
+            <input value={form.user_note || ''} onChange={e => set('user_note', e.target.value)} placeholder="仅自己可见的备注" />
+          </Field>
+        </div>
+        <div className="flex justify-end gap-3 mt-5">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition">取消</button>
+          <button onClick={() => onSave(txn.id, form)}
+            className="px-4 py-2 text-sm bg-cat-500 text-white rounded-lg hover:bg-cat-600 transition">保存</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Add Modal
+// ============================================================
+
+function AddModal({ categories, onClose, onSave }: {
+  categories: string[];
+  onClose: () => void; onSave: (txn: any) => Promise<void>;
+}) {
+  const [form, setForm] = useState({
+    trade_time: new Date().toISOString().replace('T', ' ').substring(0, 19),
+    counterparty: '', product_desc: '', amount: 0,
+    direction: 'expense' as Direction, category: '其他',
+    source: 'manual' as Source, payment_method: '', remark: '',
+  });
+  const set = (k: string, v: any) => setForm(prev => ({ ...prev, [k]: v }));
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-white rounded-2xl p-6 w-[520px] max-h-[85vh] overflow-auto shadow-xl" onClick={e => e.stopPropagation()}>
+        <h3 className="text-lg font-bold text-gray-900 mb-4">手动录入交易</h3>
+        <div className="space-y-3">
+          <Field label="交易时间">
+            <input type="datetime-local" value={form.trade_time.replace(' ', 'T').substring(0, 16)} onChange={e => set('trade_time', e.target.value.replace('T', ' '))} />
+          </Field>
+          <Field label="交易对方">
+            <input value={form.counterparty} onChange={e => set('counterparty', e.target.value)} placeholder="如：淘宝闪购" />
+          </Field>
+          <Field label="商品说明">
+            <input value={form.product_desc} onChange={e => set('product_desc', e.target.value)} placeholder="如：外卖订单" />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="金额">
+              <input type="number" step="0.01" min="0" value={form.amount} onChange={e => set('amount', parseFloat(e.target.value) || 0)} />
+            </Field>
+            <Field label="方向">
+              <select value={form.direction} onChange={e => set('direction', e.target.value)}>
+                <option value="expense">支出</option>
+                <option value="income">收入</option>
+              </select>
+            </Field>
+          </div>
+          <Field label="分类">
+            <select value={form.category} onChange={e => set('category', e.target.value)}>
+              {categories.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </Field>
+          <Field label="支付方式">
+            <input value={form.payment_method} onChange={e => set('payment_method', e.target.value)} placeholder="如：微信零钱" />
+          </Field>
+          <Field label="备注">
+            <input value={form.remark} onChange={e => set('remark', e.target.value)} />
+          </Field>
+        </div>
+        <div className="flex justify-end gap-3 mt-5">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition">取消</button>
+          <button onClick={() => onSave(form)} disabled={form.amount <= 0}
+            className="px-4 py-2 text-sm bg-cat-500 text-white rounded-lg hover:bg-cat-600 transition disabled:opacity-40">保存</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-gray-500 mb-1">{label}</label>
+      <div className="[&>input,&>select]:w-full [&>input,&>select]:px-3 [&>input,&>select]:py-2 [&>input,&>select]:text-sm [&>input,&>select]:border [&>input,&>select]:border-gray-200 [&>input,&>select]:rounded-lg [&>input,&>select]:focus:outline-none [&>input,&>select]:focus:ring-2 [&>input,&>select]:focus:ring-cat-400">
+        {children}
       </div>
     </div>
   );

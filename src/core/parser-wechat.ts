@@ -101,6 +101,7 @@ export async function parseWechatXlsx(
       merchant_txn_id: merchantId || undefined,
       remark: cleanRemark,
       reconcile_status: isRefund ? 'unmatched' : (refundAmount > 0 ? 'discrepancy' : 'matched'),
+      is_hidden: 0,
     });
   }
 

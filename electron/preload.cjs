@@ -9,12 +9,18 @@ contextBridge.exposeInMainWorld('meowLedger', {
   // 交易数据
   getTransactions: (filters) => ipcRenderer.invoke('get-transactions', filters),
   updateTransaction: (id, updates) => ipcRenderer.invoke('update-transaction', id, updates),
+  deleteTransactions: (ids) => ipcRenderer.invoke('delete-transactions', ids),
+  addTransaction: (txn) => ipcRenderer.invoke('add-transaction', txn),
 
   // 统计
-  getDashboardStats: () => ipcRenderer.invoke('get-dashboard-stats'),
+  getDashboardStats: (startDate, endDate) => ipcRenderer.invoke('get-dashboard-stats', startDate, endDate),
   getMonthlySummary: () => ipcRenderer.invoke('get-monthly-summary'),
   getRefundChains: () => ipcRenderer.invoke('get-refund-chains'),
   getStats: () => ipcRenderer.invoke('get-stats'),
+
+  // 分类
+  getCategories: () => ipcRenderer.invoke('get-categories'),
+  addCategoryRule: (rule) => ipcRenderer.invoke('add-category-rule', rule),
 
   // 导入
   importFile: (filePath) => ipcRenderer.invoke('import-file', filePath),

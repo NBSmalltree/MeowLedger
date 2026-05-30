@@ -16,7 +16,7 @@ declare global {
   interface Window {
     meowLedger?: {
       getTransactions: (filters?: any) => Promise<Transaction[]>;
-      getDashboardStats: () => Promise<DashboardStats>;
+      getDashboardStats: (startDate?: string, endDate?: string) => Promise<DashboardStats>;
       getMonthlySummary: () => Promise<MonthlySummary[]>;
       getRefundChains: () => Promise<RefundChain[]>;
       getStats: () => Promise<{ total: number; wechat: number; alipay: number }>;
@@ -27,6 +27,10 @@ declare global {
       runReconciliation: () => Promise<{ groupsCreated: number; matched: number; unmatched: number }>;
       updateTransaction: (id: number, updates: Partial<Transaction>) => Promise<void>;
       clearAllData: () => Promise<void>;
+      deleteTransactions: (ids: number[]) => Promise<{ success: boolean; deleted: number }>;
+      addTransaction: (txn: any) => Promise<{ success: boolean; id: number | null }>;
+      getCategories: () => Promise<string[]>;
+      addCategoryRule: (rule: any) => Promise<boolean>;
     };
   }
 }
@@ -44,8 +48,8 @@ const electronBackend = {
     return window.meowLedger!.getTransactions(filters);
   },
 
-  async getDashboardStats(): Promise<DashboardStats> {
-    return window.meowLedger!.getDashboardStats();
+  async getDashboardStats(startDate?: string, endDate?: string): Promise<DashboardStats> {
+    return window.meowLedger!.getDashboardStats(startDate, endDate);
   },
 
   async getRefundChains(): Promise<RefundChain[]> {
@@ -87,6 +91,22 @@ const electronBackend = {
   async clearAllData() {
     return window.meowLedger!.clearAllData();
   },
+
+  async deleteTransactions(ids: number[]) {
+    return window.meowLedger!.deleteTransactions(ids);
+  },
+
+  async addTransaction(txn: any) {
+    return window.meowLedger!.addTransaction(txn);
+  },
+
+  async getCategories(): Promise<string[]> {
+    return window.meowLedger!.getCategories();
+  },
+
+  async addCategoryRule(rule: any) {
+    return window.meowLedger!.addCategoryRule(rule);
+  },
 };
 
 // ============================================================
@@ -122,7 +142,7 @@ const mockBackend = {
     return data.sort((a, b) => b.trade_time.localeCompare(a.trade_time));
   },
 
-  async getDashboardStats(): Promise<DashboardStats> {
+  async getDashboardStats(startDate?: string, endDate?: string): Promise<DashboardStats> {
     const txns = mockTransactions().filter(t => !t.is_hidden && t.direction !== 'neutral');
     const totalExpense = txns.filter(t => t.direction === 'expense').reduce((s, t) => s + t.amount, 0);
     const totalRefund = txns.filter(t => t.is_refund).reduce((s, t) => s + t.amount, 0);
@@ -182,6 +202,10 @@ const mockBackend = {
   async runReconciliation() { return { groupsCreated: 0, matched: 0, unmatched: 0 }; },
   async updateTransaction() {},
   async clearAllData() {},
+  async deleteTransactions() { return { success: true, deleted: 0 }; },
+  async addTransaction() { return { success: true, id: 999 }; },
+  async getCategories() { return ['公共服务-电费', '交通-停车', '交通-充电', '电商-拼多多', '电商-淘宝', '餐饮-外卖', '餐饮', '线下消费', '转账', '理财', '退款', '其他']; },
+  async addCategoryRule() { return true; },
 };
 
 // ============================================================

@@ -2,7 +2,7 @@
 // 喵喵账本 - 前端类型定义（与后端共享）
 // ============================================================
 
-export type Source = 'wechat' | 'alipay';
+export type Source = 'wechat' | 'alipay' | 'manual';
 export type Direction = 'income' | 'expense' | 'neutral';
 export type ReconcileStatus = 'matched' | 'unmatched' | 'manual_matched' | 'discrepancy';
 export type ActivePage = 'dashboard' | 'ledger' | 'reconcile' | 'import' | 'export' | 'settings';
