@@ -22,6 +22,7 @@ export function Reconcile() {
   const [stats, setStats] = useState<{ unmatched: number; discrepancy: number }>({ unmatched: 0, discrepancy: 0 });
   const [showPending, setShowPending] = useState(false);
   const [pendingTxns, setPendingTxns] = useState<Transaction[]>([]);
+  const [detailTxn, setDetailTxn] = useState<Transaction | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
   const [range, setRange] = useState<TimeRange>('all');
   const [customStart, setCustomStart] = useState(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`; });
@@ -70,6 +71,7 @@ export function Reconcile() {
   };
 
   return (
+    <>
     <div className="p-6 max-w-7xl mx-auto space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-4">
         <h2 className="text-2xl font-bold text-gray-900">退款对账分析</h2>
@@ -150,7 +152,8 @@ export function Reconcile() {
                 {pendingTxns.map(txn => {
                   const member = txn.member_id ? memberMap[txn.member_id] : null;
                   return (
-                    <tr key={txn.id} className="border-b border-gray-50 hover:bg-gray-50">
+                    <tr key={txn.id} className="border-b border-gray-50 hover:bg-gray-50 cursor-pointer"
+                      onDoubleClick={() => setDetailTxn(txn)}>
                       <td className="py-2 px-2 text-gray-600 whitespace-nowrap">{txn.trade_time.substring(5, 16)}</td>
                       <td className="py-2 px-2">
                         {member ? (
@@ -271,6 +274,50 @@ export function Reconcile() {
           })
         )}
       </div>
+    </div>
+
+    {/* Transaction Detail Modal - 放在容器外，避免父级 padding 影响遮罩 */}
+    {detailTxn && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setDetailTxn(null)}>
+          <div className="bg-white rounded-2xl p-6 w-[480px] max-h-[80vh] overflow-auto shadow-xl" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-gray-900">交易明细</h3>
+              <button onClick={() => setDetailTxn(null)} className="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+            </div>
+            <div className="space-y-2 text-sm">
+              <Row label="交易时间" value={detailTxn.trade_time} />
+              <Row label="来源" value={sourceLabels[detailTxn.source] || detailTxn.source} />
+              <Row label="交易对方" value={detailTxn.counterparty || '-'} />
+              <Row label="商品说明" value={detailTxn.product_desc || '-'} />
+              <Row label="交易类型" value={detailTxn.trade_type} />
+              <Row label="金额" value={`¥${detailTxn.amount.toFixed(2)}`} highlight />
+              <Row label="方向" value={detailTxn.is_refund ? '退款' : detailTxn.direction === 'income' ? '收入' : detailTxn.direction === 'expense' ? '支出' : '中性'} />
+              <Row label="支付方式" value={detailTxn.payment_method || '-'} />
+              <Row label="交易状态" value={detailTxn.status} />
+              <Row label="分类" value={detailTxn.category || '未分类'} />
+              <Row label="对账状态" value={detailTxn.reconcile_status === 'unmatched' ? '未匹配' : detailTxn.reconcile_status === 'discrepancy' ? '有差异' : detailTxn.reconcile_status === 'matched' ? '已对平' : '手动匹配'} />
+              <Row label="轧差净额" value={detailTxn.net_amount != null ? `¥${detailTxn.net_amount.toFixed(2)}` : '-'} />
+              <Row label="退款金额" value={detailTxn.refund_amount > 0 ? `¥${detailTxn.refund_amount.toFixed(2)}` : '-'} />
+              {detailTxn.reconcile_group_id && <Row label="对账组ID" value={detailTxn.reconcile_group_id.substring(0, 8) + '...'} />}
+              {detailTxn.platform_txn_id && <Row label="交易单号" value={detailTxn.platform_txn_id} />}
+              {detailTxn.merchant_txn_id && <Row label="商户单号" value={detailTxn.merchant_txn_id} />}
+              {detailTxn.platform_order_id && <Row label="交易订单号" value={detailTxn.platform_order_id} />}
+              {detailTxn.merchant_order_id && <Row label="商家订单号" value={detailTxn.merchant_order_id} />}
+              {detailTxn.remark && <Row label="备注" value={detailTxn.remark} />}
+              {detailTxn.user_note && <Row label="用户备注" value={detailTxn.user_note} />}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function Row({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+  return (
+    <div className="flex items-center justify-between py-1.5 border-b border-gray-50">
+      <span className="text-gray-500 shrink-0">{label}</span>
+      <span className={`text-right ml-4 ${highlight ? 'font-bold text-gray-900' : 'text-gray-800'} truncate`}>{value}</span>
     </div>
   );
 }
