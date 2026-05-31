@@ -7,6 +7,13 @@ export type Direction = 'income' | 'expense' | 'neutral';
 export type ReconcileStatus = 'matched' | 'unmatched' | 'manual_matched' | 'discrepancy';
 export type ActivePage = 'dashboard' | 'ledger' | 'reconcile' | 'import' | 'export' | 'settings';
 
+export interface Member {
+  id: number;
+  name: string;
+  color: string;
+  created_at?: string;
+}
+
 export interface Transaction {
   id: number;
   source: Source;
@@ -34,6 +41,7 @@ export interface Transaction {
   reconcile_group_id?: string;
   user_note?: string;
   is_hidden: number;
+  member_id?: number;
   created_at?: string;
   updated_at?: string;
 }
@@ -74,6 +82,8 @@ export interface RefundChain {
   groupStatus: string;
   counterparty: string;
   productDesc: string;
+  memberId?: number;
+  memberName?: string;
   items: {
     txnId: number;
     tradeTime: string;
@@ -82,6 +92,7 @@ export interface RefundChain {
     status: string;
     source: Source;
     isRefund: boolean;
+    memberId?: number;
   }[];
   totalPaid: number;
   totalRefunded: number;

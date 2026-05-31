@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { dataService } from '../services/data-service';
-import type { RefundChain, Transaction } from '../types/index';
+import type { RefundChain, Transaction, Member } from '../types/index';
 
 const sourceLabels: Record<string, string> = { wechat: '微信', alipay: '支付宝' };
 
@@ -9,10 +9,18 @@ export function Reconcile() {
   const [stats, setStats] = useState<{ unmatched: number; discrepancy: number }>({ unmatched: 0, discrepancy: 0 });
   const [showPending, setShowPending] = useState(false);
   const [pendingTxns, setPendingTxns] = useState<Transaction[]>([]);
+  const [members, setMembers] = useState<Member[]>([]);
+
+  const memberMap = Object.fromEntries(members.map(m => [m.id, m]));
 
   useEffect(() => {
-    dataService.getRefundChains().then(setChains);
-    dataService.getDashboardStats().then(s => setStats({ unmatched: s.unmatchedCount, discrepancy: s.discrepancyCount }));
+    // getRefundChains 会自动修复未关联的记录，必须先于 getDashboardStats
+    dataService.getRefundChains().then(chains => {
+      setChains(chains);
+      // 修复完成后再获取统计数据，确保一致
+      dataService.getDashboardStats().then(s => setStats({ unmatched: s.unmatchedCount, discrepancy: s.discrepancyCount }));
+    });
+    dataService.getMembers().then(setMembers);
   }, []);
 
   const loadPendingTxns = async () => {
@@ -78,6 +86,7 @@ export function Reconcile() {
               <thead>
                 <tr className="border-b border-gray-100">
                   <th className="text-left py-2 px-2 text-gray-500 font-medium">时间</th>
+                  <th className="text-left py-2 px-2 text-gray-500 font-medium">成员</th>
                   <th className="text-left py-2 px-2 text-gray-500 font-medium">来源</th>
                   <th className="text-left py-2 px-2 text-gray-500 font-medium">对方</th>
                   <th className="text-left py-2 px-2 text-gray-500 font-medium">商品</th>
@@ -87,29 +96,41 @@ export function Reconcile() {
                 </tr>
               </thead>
               <tbody>
-                {pendingTxns.map(txn => (
-                  <tr key={txn.id} className="border-b border-gray-50 hover:bg-gray-50">
-                    <td className="py-2 px-2 text-gray-600 whitespace-nowrap">{txn.trade_time.substring(5, 16)}</td>
-                    <td className="py-2 px-2">
-                      <span className={`text-xs px-1.5 py-0.5 rounded ${txn.source === 'wechat' ? 'bg-green-50 text-green-600' : 'bg-blue-50 text-blue-600'}`}>
-                        {sourceLabels[txn.source] || txn.source}
-                      </span>
-                    </td>
-                    <td className="py-2 px-2 text-gray-900">{txn.counterparty || '-'}</td>
-                    <td className="py-2 px-2 text-gray-500 text-xs max-w-48 truncate">{txn.product_desc || '-'}</td>
-                    <td className={`py-2 px-2 text-right font-mono font-medium ${txn.is_refund ? 'text-green-600' : 'text-gray-900'}`}>
-                      {txn.is_refund ? '+' : '-'}¥{txn.amount.toFixed(2)}
-                    </td>
-                    <td className="py-2 px-2 text-center">
-                      <span className={`text-xs px-1.5 py-0.5 rounded ${txn.reconcile_status === 'unmatched' ? 'bg-red-50 text-red-600' : 'bg-amber-50 text-amber-600'}`}>
-                        {txn.reconcile_status === 'unmatched' ? '未匹配' : '有差异'}
-                      </span>
-                    </td>
-                    <td className="py-2 px-2 text-center text-xs text-gray-400">
-                      {txn.is_refund ? '退款未找到原支付' : txn.reconcile_status === 'discrepancy' ? '退款金额有差' : '未被退款关联'}
-                    </td>
-                  </tr>
-                ))}
+                {pendingTxns.map(txn => {
+                  const member = txn.member_id ? memberMap[txn.member_id] : null;
+                  return (
+                    <tr key={txn.id} className="border-b border-gray-50 hover:bg-gray-50">
+                      <td className="py-2 px-2 text-gray-600 whitespace-nowrap">{txn.trade_time.substring(5, 16)}</td>
+                      <td className="py-2 px-2">
+                        {member ? (
+                          <span className="inline-flex items-center gap-1 text-xs">
+                            <span className="w-4 h-4 rounded-full text-white text-[10px] font-bold leading-4 text-center"
+                              style={{ backgroundColor: member.color }}>{member.name[0]}</span>
+                            {member.name}
+                          </span>
+                        ) : <span className="text-xs text-gray-300">-</span>}
+                      </td>
+                      <td className="py-2 px-2">
+                        <span className={`text-xs px-1.5 py-0.5 rounded ${txn.source === 'wechat' ? 'bg-green-50 text-green-600' : 'bg-blue-50 text-blue-600'}`}>
+                          {sourceLabels[txn.source] || txn.source}
+                        </span>
+                      </td>
+                      <td className="py-2 px-2 text-gray-900">{txn.counterparty || '-'}</td>
+                      <td className="py-2 px-2 text-gray-500 text-xs max-w-48 truncate">{txn.product_desc || '-'}</td>
+                      <td className={`py-2 px-2 text-right font-mono font-medium ${txn.is_refund ? 'text-green-600' : 'text-gray-900'}`}>
+                        {txn.is_refund ? '+' : '-'}¥{txn.amount.toFixed(2)}
+                      </td>
+                      <td className="py-2 px-2 text-center">
+                        <span className={`text-xs px-1.5 py-0.5 rounded ${txn.reconcile_status === 'unmatched' ? 'bg-red-50 text-red-600' : 'bg-amber-50 text-amber-600'}`}>
+                          {txn.reconcile_status === 'unmatched' ? '未匹配' : '有差异'}
+                        </span>
+                      </td>
+                      <td className="py-2 px-2 text-center text-xs text-gray-400">
+                        {txn.is_refund ? '退款未找到原支付' : txn.reconcile_status === 'discrepancy' ? '退款金额有差' : '未被退款关联'}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -127,6 +148,10 @@ export function Reconcile() {
         ) : (
           chains.map(chain => {
             const st = statusLabels[chain.groupStatus] || statusLabels.open;
+            // Infer member from items
+            const chainMemberId = chain.items[0]?.memberId;
+            const chainMember = chainMemberId ? memberMap[chainMemberId] : null;
+
             return (
               <div key={chain.groupId} className="bg-white rounded-xl border border-gray-200 p-5">
                 {/* Header */}
@@ -134,7 +159,16 @@ export function Reconcile() {
                   <div className="flex items-center gap-3">
                     <span className="text-xl">📦</span>
                     <div>
-                      <div className="font-semibold text-gray-900">{chain.counterparty}</div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-gray-900">{chain.counterparty}</span>
+                        {chainMember && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium"
+                            style={{ backgroundColor: chainMember.color + '20', color: chainMember.color }}>
+                            <span className="w-3 h-3 rounded-full" style={{ backgroundColor: chainMember.color }} />
+                            {chainMember.name}
+                          </span>
+                        )}
+                      </div>
                       <div className="text-xs text-gray-500">{chain.productDesc}</div>
                     </div>
                   </div>
@@ -148,22 +182,31 @@ export function Reconcile() {
                 {/* Timeline */}
                 <div className="relative pl-8 space-y-3">
                   <div className="absolute left-3 top-2 bottom-2 w-0.5 bg-gray-200" />
-                  {chain.items.map((item, idx) => (
-                    <div key={idx} className="relative flex items-center gap-3">
-                      <div className={`absolute left-[-20px] w-3 h-3 rounded-full border-2 ${item.isRefund ? 'bg-green-400 border-green-500' : 'bg-blue-400 border-blue-500'}`} />
-                      <span className="text-xs text-gray-500 w-32 shrink-0">{item.tradeTime.substring(5, 16)}</span>
-                      <span className={`px-2 py-0.5 rounded text-xs ${item.isRefund ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
-                        {item.isRefund ? '退款' : '支付'}
-                      </span>
-                      <span className="font-mono text-sm font-medium">
-                        {item.isRefund ? '+' : '-'}¥{item.amount.toFixed(2)}
-                      </span>
-                      <span className={`text-xs px-1.5 py-0.5 rounded ${item.source === 'wechat' ? 'bg-green-50 text-green-600' : 'bg-blue-50 text-blue-600'}`}>
-                        {sourceLabels[item.source]}
-                      </span>
-                      <span className="text-xs text-gray-400">{item.status}</span>
-                    </div>
-                  ))}
+                  {chain.items.map((item, idx) => {
+                    const itemMember = item.memberId ? memberMap[item.memberId] : null;
+                    return (
+                      <div key={idx} className="relative flex items-center gap-3">
+                        <div className={`absolute left-[-20px] w-3 h-3 rounded-full border-2 ${item.isRefund ? 'bg-green-400 border-green-500' : 'bg-blue-400 border-blue-500'}`} />
+                        <span className="text-xs text-gray-500 w-32 shrink-0">{item.tradeTime.substring(5, 16)}</span>
+                        <span className={`px-2 py-0.5 rounded text-xs ${item.isRefund ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
+                          {item.isRefund ? '退款' : '支付'}
+                        </span>
+                        <span className="font-mono text-sm font-medium">
+                          {item.isRefund ? '+' : '-'}¥{item.amount.toFixed(2)}
+                        </span>
+                        <span className={`text-xs px-1.5 py-0.5 rounded ${item.source === 'wechat' ? 'bg-green-50 text-green-600' : 'bg-blue-50 text-blue-600'}`}>
+                          {sourceLabels[item.source]}
+                        </span>
+                        {itemMember && (
+                          <span className="text-xs px-1.5 py-0.5 rounded-full"
+                            style={{ backgroundColor: itemMember.color + '20', color: itemMember.color }}>
+                            {itemMember.name}
+                          </span>
+                        )}
+                        <span className="text-xs text-gray-400">{item.status}</span>
+                      </div>
+                    );
+                  })}
                 </div>
 
                 {/* Summary */}

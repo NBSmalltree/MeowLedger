@@ -9,7 +9,7 @@ import { fileURLToPath } from 'url';
 import type {
   Transaction, Source, Direction, ReconcileStatus,
   MonthlySummary, CategorySummary, DashboardStats,
-  ReconcileGroup, RefundChain, CategoryRule, ImportResult
+  ReconcileGroup, RefundChain, CategoryRule, ImportResult, Member
 } from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -19,6 +19,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // ============================================================
 
 const SCHEMA_SQL = `
+-- 家庭成员表
+CREATE TABLE IF NOT EXISTS members (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  name            TEXT NOT NULL UNIQUE,
+  color           TEXT NOT NULL DEFAULT '#3b82f6',
+  created_at      TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+-- 预置默认成员（仅当表为空时）
+INSERT INTO members (id, name, color) SELECT 1, '成员一', '#3b82f6' WHERE NOT EXISTS (SELECT 1 FROM members);
+INSERT INTO members (id, name, color) SELECT 2, '成员二', '#ec4899' WHERE NOT EXISTS (SELECT 1 FROM members);
+
 -- 主交易表
 CREATE TABLE IF NOT EXISTS transactions (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,6 +60,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   reconcile_group_id TEXT,
   user_note       TEXT,
   is_hidden       INTEGER NOT NULL DEFAULT 0,
+  member_id       INTEGER REFERENCES members(id),
   created_at      TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
   updated_at      TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
   UNIQUE(source, platform_txn_id, trade_time)
@@ -63,6 +76,7 @@ CREATE INDEX IF NOT EXISTS idx_txn_counterparty ON transactions(counterparty);
 CREATE INDEX IF NOT EXISTS idx_txn_platform_id ON transactions(platform_txn_id);
 CREATE INDEX IF NOT EXISTS idx_txn_is_refund ON transactions(is_refund);
 CREATE INDEX IF NOT EXISTS idx_txn_reconcile_group ON transactions(reconcile_group_id);
+CREATE INDEX IF NOT EXISTS idx_txn_member ON transactions(member_id);
 
 -- 对账组表
 CREATE TABLE IF NOT EXISTS reconcile_groups (
@@ -90,6 +104,7 @@ CREATE TABLE IF NOT EXISTS import_records (
   file_name       TEXT NOT NULL,
   file_hash       TEXT NOT NULL,
   record_count    INTEGER NOT NULL,
+  member_id       INTEGER REFERENCES members(id),
   imported_at     TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
   UNIQUE(file_hash)
 );
@@ -150,6 +165,13 @@ export class MeowDB {
 
   private init(): void {
     this.db.exec(SCHEMA_SQL);
+    // Migration: add member_id column if missing (for existing databases)
+    try {
+      this.db.exec('ALTER TABLE transactions ADD COLUMN member_id INTEGER REFERENCES members(id)');
+    } catch { /* column already exists */ }
+    try {
+      this.db.exec('ALTER TABLE import_records ADD COLUMN member_id INTEGER REFERENCES members(id)');
+    } catch { /* column already exists */ }
   }
 
   close(): void {
@@ -168,14 +190,14 @@ export class MeowDB {
         direction, amount, net_amount, payment_method,
         status, is_refund, refund_amount, original_txn_id,
         platform_txn_id, merchant_txn_id, platform_order_id, merchant_order_id,
-        remark, reconcile_status, reconcile_group_id
+        remark, reconcile_status, reconcile_group_id, member_id
       ) VALUES (
         @source, @source_file, @trade_time, @trade_type, @category,
         @counterparty, @counterparty_account, @product_desc,
         @direction, @amount, @net_amount, @payment_method,
         @status, @is_refund, @refund_amount, @original_txn_id,
         @platform_txn_id, @merchant_txn_id, @platform_order_id, @merchant_order_id,
-        @remark, @reconcile_status, @reconcile_group_id
+        @remark, @reconcile_status, @reconcile_group_id, @member_id
       )
     `);
 
@@ -203,6 +225,7 @@ export class MeowDB {
       remark: txn.remark || null,
       reconcile_status: txn.reconcile_status || 'unmatched',
       reconcile_group_id: txn.reconcile_group_id || null,
+      member_id: txn.member_id || null,
     });
 
     return result.changes > 0 ? Number(result.lastInsertRowid) : null;
@@ -233,6 +256,7 @@ export class MeowDB {
     category?: string;
     search?: string;
     isRefund?: number;
+    memberId?: number;
     limit?: number;
     offset?: number;
   }): Transaction[] {
@@ -270,6 +294,10 @@ export class MeowDB {
     if (filters?.isRefund !== undefined) {
       sql += ' AND is_refund = @isRefund';
       params.isRefund = filters.isRefund;
+    }
+    if (filters?.memberId) {
+      sql += ' AND member_id = @memberId';
+      params.memberId = filters.memberId;
     }
 
     sql += ' ORDER BY trade_time DESC';
@@ -315,7 +343,7 @@ export class MeowDB {
 
   updateTransaction(id: number, updates: Partial<Transaction>): void {
     const allowed = ['category', 'direction', 'net_amount', 'refund_amount', 'is_refund',
-      'reconcile_status', 'reconcile_group_id', 'user_note', 'is_hidden'];
+      'reconcile_status', 'reconcile_group_id', 'user_note', 'is_hidden', 'member_id'];
     const sets: string[] = [];
     const params: Record<string, any> = { id };
 
@@ -336,7 +364,7 @@ export class MeowDB {
   // DASHBOARD STATS
   // ============================================================
 
-  getDashboardStats(startDate?: string, endDate?: string): DashboardStats {
+  getDashboardStats(startDate?: string, endDate?: string, memberId?: number): DashboardStats {
     const params: Record<string, any> = {};
     let dateFilter = '';
     if (startDate) {
@@ -346,6 +374,10 @@ export class MeowDB {
     if (endDate) {
       dateFilter += ' AND trade_time <= @endDate';
       params.endDate = endDate + ' 23:59:59';
+    }
+    if (memberId) {
+      dateFilter += ' AND member_id = @memberId';
+      params.memberId = memberId;
     }
 
     // 基础统计
@@ -421,7 +453,8 @@ export class MeowDB {
   // MONTHLY SUMMARY
   // ============================================================
 
-  getMonthlySummary(): MonthlySummary[] {
+  getMonthlySummary(memberId?: number): MonthlySummary[] {
+    const memberFilter = memberId ? ' AND member_id = ' + memberId : '';
     return this.db.prepare(`
       SELECT
         strftime('%Y-%m', trade_time) AS month,
@@ -433,7 +466,7 @@ export class MeowDB {
         COALESCE(SUM(CASE WHEN direction = 'expense' THEN amount ELSE 0 END)
           - SUM(CASE WHEN is_refund = 1 THEN amount ELSE 0 END), 0) AS net_expense
       FROM transactions
-      WHERE is_hidden = 0 AND direction != 'neutral'
+      WHERE is_hidden = 0 AND direction != 'neutral' ${memberFilter}
       GROUP BY strftime('%Y-%m', trade_time), source
       ORDER BY month DESC, source
     `).all() as MonthlySummary[];
@@ -465,40 +498,64 @@ export class MeowDB {
       ORDER BY trade_time DESC
     `).all() as Transaction[];
 
-    // Step 2: Find unmatched refunds and look up their original payments
+    // Step 2: Find unmatched refunds using the same 3 strategies as reconcile engine
+    const allPayments = this.db.prepare(`
+      SELECT * FROM transactions WHERE direction = 'expense' AND is_refund = 0 AND is_hidden = 0 ORDER BY trade_time DESC
+    `).all() as Transaction[];
     const allUnmatchedRefunds = refundRelatedTxns.filter(t => t.is_refund === 1 && !t.reconcile_group_id);
     const newlyLinked: { refund: Transaction; payment: Transaction }[] = [];
+    const existingIds = new Set(refundRelatedTxns.map(t => t.id));
+    const usedPaymentIds = new Set<number>();
 
-    if (allUnmatchedRefunds.length > 0) {
-      const existingIds = new Set(refundRelatedTxns.map(t => t.id));
+    for (const refund of allUnmatchedRefunds) {
+      let bestMatch: Transaction | null = null;
       const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
 
-      for (const refund of allUnmatchedRefunds) {
-        if (!refund.counterparty) continue;
+      // 策略一：商户单号精确匹配
+      const refundMId = refund.merchant_txn_id || refund.merchant_order_id || '';
+      if (refundMId) {
+        bestMatch = allPayments.find(t =>
+          !usedPaymentIds.has(t.id!) && t.id !== refund.id &&
+          (t.merchant_txn_id === refundMId || t.merchant_order_id === refundMId)
+        ) || null;
+      }
+
+      // 策略二：counterparty + 金额 + 时间窗口
+      if (!bestMatch && refund.counterparty) {
         const refundTime = new Date(refund.trade_time).getTime();
-
-        const candidate = this.db.prepare(`
-          SELECT * FROM transactions
-          WHERE counterparty = @counterparty
-            AND direction = 'expense'
-            AND is_refund = 0
-            AND is_hidden = 0
-            AND amount >= @amount
-            AND trade_time < @refundTime
-          ORDER BY trade_time DESC
-        `).get({
-          counterparty: refund.counterparty,
-          amount: refund.amount,
-          refundTime: refund.trade_time,
-        }) as Transaction | undefined;
-
-        if (candidate && existingIds.has(candidate.id) === false) {
-          const timeDiff = refundTime - new Date(candidate.trade_time).getTime();
-          if (timeDiff > 0 && timeDiff < thirtyDaysMs) {
-            refundRelatedTxns.push(candidate);
-            newlyLinked.push({ refund, payment: candidate });
-          }
+        const candidates = allPayments.filter(t => {
+          if (t.id === refund.id || usedPaymentIds.has(t.id!)) return false;
+          if (t.counterparty !== refund.counterparty) return false;
+          if (refund.amount > t.amount) return false;
+          const payTime = new Date(t.trade_time).getTime();
+          return refundTime > payTime && (refundTime - payTime) < thirtyDaysMs;
+        });
+        if (candidates.length > 0) {
+          bestMatch = candidates.reduce((c, curr) =>
+            Math.abs(new Date(curr.trade_time).getTime() - new Date(refund.trade_time).getTime()) <
+            Math.abs(new Date(c.trade_time).getTime() - new Date(refund.trade_time).getTime()) ? curr : c
+          );
         }
+      }
+
+      // 策略三：product_desc 模糊匹配
+      if (!bestMatch && refund.product_desc) {
+        const clean = refund.product_desc.replace(/^退款[-\s]*/, '');
+        if (clean.length > 2) {
+          const refundTime = new Date(refund.trade_time).getTime();
+          bestMatch = allPayments.find(t => {
+            if (t.id === refund.id || usedPaymentIds.has(t.id!)) return false;
+            const pm = (t.product_desc || '').includes(clean) || (t.counterparty || '').includes(clean) || clean.includes(t.counterparty || '');
+            const tm = refundTime > new Date(t.trade_time).getTime() && (refundTime - new Date(t.trade_time).getTime()) < thirtyDaysMs;
+            return pm && tm;
+          }) || null;
+        }
+      }
+
+      if (bestMatch && !existingIds.has(bestMatch.id!)) {
+        refundRelatedTxns.push(bestMatch);
+        newlyLinked.push({ refund, payment: bestMatch });
+        usedPaymentIds.add(bestMatch.id!);
       }
     }
 
@@ -593,11 +650,11 @@ export class MeowDB {
   // IMPORT RECORDS
   // ============================================================
 
-  recordImport(source: Source, fileName: string, fileHash: string, count: number): void {
+  recordImport(source: Source, fileName: string, fileHash: string, count: number, memberId?: number): void {
     this.db.prepare(`
-      INSERT OR IGNORE INTO import_records (source, file_name, file_hash, record_count)
-      VALUES (?, ?, ?, ?)
-    `).run(source, fileName, fileHash, count);
+      INSERT OR IGNORE INTO import_records (source, file_name, file_hash, record_count, member_id)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(source, fileName, fileHash, count, memberId || null);
   }
 
   isFileImported(fileHash: string): boolean {
@@ -605,8 +662,42 @@ export class MeowDB {
     return result.count > 0;
   }
 
-  getImportHistory(): { id: number; source: string; file_name: string; record_count: number; imported_at: string }[] {
+  getImportHistory(): { id: number; source: string; file_name: string; record_count: number; member_id: number; imported_at: string }[] {
     return this.db.prepare('SELECT * FROM import_records ORDER BY imported_at DESC').all() as any[];
+  }
+
+  // ============================================================
+  // MEMBERS
+  // ============================================================
+
+  getMembers(): Member[] {
+    return this.db.prepare('SELECT * FROM members ORDER BY id').all() as Member[];
+  }
+
+  addMember(name: string, color: string): number | null {
+    const result = this.db.prepare('INSERT INTO members (name, color) VALUES (?, ?)').run(name, color);
+    return result.changes > 0 ? Number(result.lastInsertRowid) : null;
+  }
+
+  updateMember(id: number, updates: { name?: string; color?: string }): void {
+    const sets: string[] = [];
+    const params: Record<string, any> = { id };
+    if (updates.name) { sets.push('name = @name'); params.name = updates.name; }
+    if (updates.color) { sets.push('color = @color'); params.color = updates.color; }
+    if (sets.length === 0) return;
+    this.db.prepare(`UPDATE members SET ${sets.join(', ')} WHERE id = @id`).run(params);
+  }
+
+  deleteMember(id: number): boolean {
+    // Check if any transactions reference this member
+    const count = this.db.prepare('SELECT COUNT(*) as c FROM transactions WHERE member_id = ?').get(id) as { c: number };
+    if (count.c > 0) return false;
+    this.db.prepare('DELETE FROM members WHERE id = ?').run(id);
+    return true;
+  }
+
+  getMemberById(id: number): Member | undefined {
+    return this.db.prepare('SELECT * FROM members WHERE id = ?').get(id) as Member | undefined;
   }
 
   // ============================================================
@@ -696,10 +787,11 @@ export class MeowDB {
     this.db.exec('DELETE FROM import_records');
   }
 
-  getStats(): { total: number; wechat: number; alipay: number } {
-    const total = this.db.prepare('SELECT COUNT(*) as c FROM transactions').get() as { c: number };
-    const wechat = this.db.prepare("SELECT COUNT(*) as c FROM transactions WHERE source='wechat'").get() as { c: number };
-    const alipay = this.db.prepare("SELECT COUNT(*) as c FROM transactions WHERE source='alipay'").get() as { c: number };
+  getStats(memberId?: number): { total: number; wechat: number; alipay: number } {
+    const memberFilter = memberId ? ' WHERE member_id = ' + memberId : '';
+    const total = this.db.prepare(`SELECT COUNT(*) as c FROM transactions${memberFilter}`).get() as { c: number };
+    const wechat = this.db.prepare(`SELECT COUNT(*) as c FROM transactions${memberFilter ? memberFilter + ' AND' : ' WHERE'} source='wechat'`).get() as { c: number };
+    const alipay = this.db.prepare(`SELECT COUNT(*) as c FROM transactions${memberFilter ? memberFilter + ' AND' : ' WHERE'} source='alipay'`).get() as { c: number };
     return { total: total.c, wechat: wechat.c, alipay: alipay.c };
   }
 }

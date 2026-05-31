@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { dataService } from '../services/data-service';
-import type { Transaction, Source, Direction } from '../types/index';
+import type { Transaction, Source, Direction, Member } from '../types/index';
 
 const sourceLabels: Record<string, string> = { wechat: '微信', alipay: '支付宝', manual: '手动' };
 
@@ -9,23 +9,31 @@ export function Ledger() {
   const [sourceFilter, setSourceFilter] = useState<Source | 'all'>('all');
   const [dirFilter, setDirFilter] = useState<string>('all');
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
+  const [memberFilter, setMemberFilter] = useState<string>('all');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [categories, setCategories] = useState<string[]>([]);
+  const [members, setMembers] = useState<Member[]>([]);
   const [editingTxn, setEditingTxn] = useState<Transaction | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
+
+  const memberMap = Object.fromEntries(members.map(m => [m.id, m]));
 
   const refresh = useCallback(async () => {
     const data = await dataService.getTransactions({
       source: sourceFilter === 'all' ? undefined : sourceFilter,
       direction: dirFilter === 'all' ? undefined : (dirFilter as Direction),
       search: search || undefined,
+      memberId: memberFilter === 'all' ? undefined : parseInt(memberFilter),
     });
     setTxns(categoryFilter === 'all' ? data : data.filter(t => t.category === categoryFilter));
-  }, [sourceFilter, dirFilter, categoryFilter, search]);
+  }, [sourceFilter, dirFilter, categoryFilter, memberFilter, search]);
 
   useEffect(() => { refresh(); }, [refresh]);
-  useEffect(() => { dataService.getCategories().then(setCategories); }, []);
+  useEffect(() => {
+    dataService.getCategories().then(setCategories);
+    dataService.getMembers().then(setMembers);
+  }, []);
 
   const handleDelete = async (ids: number[]) => {
     if (ids.length === 0) return;
@@ -51,12 +59,10 @@ export function Ledger() {
 
   const formatTime = (t: string) => {
     if (!t) return '-';
-    // 兼容多种格式: "2026-05-27 22:23:16", "2026-05-27T22:23", "05-27 22:23"
     const clean = t.replace('T', ' ');
     const parts = clean.split(' ');
     const datePart = parts[0] || '';
     const timePart = parts[1] || '';
-    // datePart 可能是 "2026-05-27" 或 "05-27"
     const short = datePart.length >= 10 ? datePart.substring(5) : datePart;
     return timePart ? `${short} ${timePart.substring(0, 5)}` : short;
   };
@@ -98,6 +104,22 @@ export function Ledger() {
 
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-3 mb-4">
+        {/* Member Filter */}
+        {members.length > 0 && (
+          <div className="flex bg-gray-100 rounded-lg p-0.5">
+            <button onClick={() => setMemberFilter('all')}
+              className={`px-3 py-1.5 text-sm rounded-md transition ${memberFilter === 'all' ? 'bg-white shadow-sm font-medium text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>
+              全部成员
+            </button>
+            {members.map(m => (
+              <button key={m.id} onClick={() => setMemberFilter(String(m.id))}
+                className={`px-3 py-1.5 text-sm rounded-md transition ${memberFilter === String(m.id) ? 'bg-white shadow-sm font-medium text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>
+                {m.name}
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="flex bg-gray-100 rounded-lg p-0.5">
           {(['all', 'wechat', 'alipay', 'manual'] as const).map(s => (
             <button key={s} onClick={() => setSourceFilter(s as any)}
@@ -138,6 +160,7 @@ export function Ledger() {
                   className="w-4 h-4 rounded border-gray-300 text-cat-500" />
               </th>
               <th className="px-3 py-3 font-medium w-28">时间</th>
+              <th className="px-3 py-3 font-medium w-16">成员</th>
               <th className="px-3 py-3 font-medium w-20">来源</th>
               <th className="px-3 py-3 font-medium w-24">分类</th>
               <th className="px-3 py-3 font-medium">交易对方</th>
@@ -149,43 +172,54 @@ export function Ledger() {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {txns.map(txn => (
-              <tr key={txn.id}
-                className={`hover:bg-gray-50 transition cursor-pointer ${txn.is_refund ? 'bg-green-50/30' : ''} ${selected.has(txn.id) ? 'bg-blue-50/30' : ''}`}
-                onDoubleClick={() => setEditingTxn(txn)}>
-                <td className="px-3 py-2.5">
-                  <input type="checkbox" checked={selected.has(txn.id)} onChange={() => toggleSelect(txn.id)}
-                    className="w-4 h-4 rounded border-gray-300 text-cat-500" />
-                </td>
-                <td className="px-3 py-2.5 text-gray-600 whitespace-nowrap text-xs">{formatTime(txn.trade_time)}</td>
-                <td className="px-3 py-2.5">
-                  <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium whitespace-nowrap ${txn.source === 'wechat' ? 'bg-green-100 text-green-700' : txn.source === 'alipay' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>
-                    {sourceLabels[txn.source] || txn.source}
-                  </span>
-                </td>
-                <td className="px-3 py-2.5 text-xs text-gray-500 max-w-[80px] truncate" title={txn.category}>{txn.category || '-'}</td>
-                <td className="px-3 py-2.5 text-gray-900 max-w-[140px] truncate" title={txn.counterparty}>{txn.counterparty || '-'}</td>
-                <td className="px-3 py-2.5 text-gray-500 max-w-[160px] truncate" title={txn.product_desc}>{txn.product_desc || '-'}</td>
-                <td className="px-3 py-2.5 text-xs text-gray-400 max-w-[100px] truncate" title={txn.payment_method}>{txn.payment_method || '-'}</td>
-                <td className={`px-3 py-2.5 text-right font-mono font-medium whitespace-nowrap ${amountColor(txn)}`}>
-                  {dirIcon(txn)} {amountStr(txn)}
-                  {txn.refund_amount > 0 && !txn.is_refund && (
-                    <div className="text-xs text-amber-500">已退¥{txn.refund_amount.toFixed(2)}</div>
-                  )}
-                </td>
-                <td className="px-3 py-2.5 text-xs text-gray-400">
-                  {txn.reconcile_status === 'matched' ? '✅' : txn.reconcile_status === 'discrepancy' ? '⚠️' : txn.reconcile_status === 'unmatched' ? '❌' : '🔗'}
-                </td>
-                <td className="px-3 py-2.5">
-                  <div className="flex items-center gap-1">
-                    <button onClick={() => setEditingTxn(txn)} title="编辑"
-                      className="p-1 text-gray-400 hover:text-cat-600 rounded transition">✏️</button>
-                    <button onClick={() => handleDelete([txn.id])} title="删除"
-                      className="p-1 text-gray-400 hover:text-red-600 rounded transition">🗑️</button>
-                  </div>
-                </td>
-              </tr>
-            ))}
+            {txns.map(txn => {
+              const member = txn.member_id ? memberMap[txn.member_id] : null;
+              return (
+                <tr key={txn.id}
+                  className={`hover:bg-gray-50 transition cursor-pointer ${txn.is_refund ? 'bg-green-50/30' : ''} ${selected.has(txn.id) ? 'bg-blue-50/30' : ''}`}
+                  onDoubleClick={() => setEditingTxn(txn)}>
+                  <td className="px-3 py-2.5">
+                    <input type="checkbox" checked={selected.has(txn.id)} onChange={() => toggleSelect(txn.id)}
+                      className="w-4 h-4 rounded border-gray-300 text-cat-500" />
+                  </td>
+                  <td className="px-3 py-2.5 text-gray-600 whitespace-nowrap text-xs">{formatTime(txn.trade_time)}</td>
+                  <td className="px-3 py-2.5">
+                    {member ? (
+                      <span className="inline-block w-6 h-6 rounded-full text-white text-xs font-bold leading-6 text-center"
+                        style={{ backgroundColor: member.color }} title={member.name}>
+                        {member.name[0]}
+                      </span>
+                    ) : <span className="text-xs text-gray-300">-</span>}
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium whitespace-nowrap ${txn.source === 'wechat' ? 'bg-green-100 text-green-700' : txn.source === 'alipay' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>
+                      {sourceLabels[txn.source] || txn.source}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2.5 text-xs text-gray-500 max-w-[80px] truncate" title={txn.category}>{txn.category || '-'}</td>
+                  <td className="px-3 py-2.5 text-gray-900 max-w-[140px] truncate" title={txn.counterparty}>{txn.counterparty || '-'}</td>
+                  <td className="px-3 py-2.5 text-gray-500 max-w-[160px] truncate" title={txn.product_desc}>{txn.product_desc || '-'}</td>
+                  <td className="px-3 py-2.5 text-xs text-gray-400 max-w-[100px] truncate" title={txn.payment_method}>{txn.payment_method || '-'}</td>
+                  <td className={`px-3 py-2.5 text-right font-mono font-medium whitespace-nowrap ${amountColor(txn)}`}>
+                    {dirIcon(txn)} {amountStr(txn)}
+                    {txn.refund_amount > 0 && !txn.is_refund && (
+                      <div className="text-xs text-amber-500">已退¥{txn.refund_amount.toFixed(2)}</div>
+                    )}
+                  </td>
+                  <td className="px-3 py-2.5 text-xs text-gray-400">
+                    {txn.reconcile_status === 'matched' ? '✅' : txn.reconcile_status === 'discrepancy' ? '⚠️' : txn.reconcile_status === 'unmatched' ? '❌' : '🔗'}
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <div className="flex items-center gap-1">
+                      <button onClick={() => setEditingTxn(txn)} title="编辑"
+                        className="p-1 text-gray-400 hover:text-cat-600 rounded transition">✏️</button>
+                      <button onClick={() => handleDelete([txn.id])} title="删除"
+                        className="p-1 text-gray-400 hover:text-red-600 rounded transition">🗑️</button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
         {txns.length === 0 && <div className="text-center py-12 text-gray-400">暂无数据</div>}
@@ -197,11 +231,11 @@ export function Ledger() {
       </div>
 
       {/* Edit Modal */}
-      {editingTxn && <EditModal txn={editingTxn} categories={categories} onClose={() => setEditingTxn(null)}
+      {editingTxn && <EditModal txn={editingTxn} categories={categories} members={members} onClose={() => setEditingTxn(null)}
         onSave={async (id, updates) => { await dataService.updateTransaction(id, updates); setEditingTxn(null); refresh(); }} />}
 
       {/* Add Modal */}
-      {showAddModal && <AddModal categories={categories} onClose={() => setShowAddModal(false)}
+      {showAddModal && <AddModal categories={categories} members={members} onClose={() => setShowAddModal(false)}
         onSave={async (txn) => { await dataService.addTransaction(txn); setShowAddModal(false); refresh(); }} />}
     </div>
   );
@@ -211,8 +245,8 @@ export function Ledger() {
 // Edit Modal
 // ============================================================
 
-function EditModal({ txn, categories, onClose, onSave }: {
-  txn: Transaction; categories: string[];
+function EditModal({ txn, categories, members, onClose, onSave }: {
+  txn: Transaction; categories: string[]; members: Member[];
   onClose: () => void; onSave: (id: number, updates: Partial<Transaction>) => Promise<void>;
 }) {
   const [form, setForm] = useState({ ...txn });
@@ -226,6 +260,14 @@ function EditModal({ txn, categories, onClose, onSave }: {
           <Field label="交易时间">
             <input type="datetime-local" value={form.trade_time?.replace(' ', 'T')?.substring(0, 16) || ''} onChange={e => set('trade_time', e.target.value.replace('T', ' '))} />
           </Field>
+          {members.length > 0 && (
+            <Field label="成员">
+              <select value={form.member_id || ''} onChange={e => set('member_id', e.target.value ? parseInt(e.target.value) : undefined)}>
+                <option value="">未指定</option>
+                {members.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+              </select>
+            </Field>
+          )}
           <Field label="交易对方">
             <input value={form.counterparty || ''} onChange={e => set('counterparty', e.target.value)} />
           </Field>
@@ -283,8 +325,8 @@ function EditModal({ txn, categories, onClose, onSave }: {
 // Add Modal
 // ============================================================
 
-function AddModal({ categories, onClose, onSave }: {
-  categories: string[];
+function AddModal({ categories, members, onClose, onSave }: {
+  categories: string[]; members: Member[];
   onClose: () => void; onSave: (txn: any) => Promise<void>;
 }) {
   const [form, setForm] = useState({
@@ -292,6 +334,7 @@ function AddModal({ categories, onClose, onSave }: {
     counterparty: '', product_desc: '', amount: 0,
     direction: 'expense' as Direction, category: '其他',
     source: 'manual' as Source, payment_method: '', remark: '',
+    member_id: members.length > 0 ? members[0].id : undefined,
   });
   const set = (k: string, v: any) => setForm(prev => ({ ...prev, [k]: v }));
 
@@ -303,6 +346,13 @@ function AddModal({ categories, onClose, onSave }: {
           <Field label="交易时间">
             <input type="datetime-local" value={form.trade_time.replace(' ', 'T').substring(0, 16)} onChange={e => set('trade_time', e.target.value.replace('T', ' '))} />
           </Field>
+          {members.length > 0 && (
+            <Field label="成员">
+              <select value={form.member_id || ''} onChange={e => set('member_id', e.target.value ? parseInt(e.target.value) : undefined)}>
+                {members.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+              </select>
+            </Field>
+          )}
           <Field label="交易对方">
             <input value={form.counterparty} onChange={e => set('counterparty', e.target.value)} placeholder="如：淘宝闪购" />
           </Field>

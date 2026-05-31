@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { dataService } from '../services/data-service';
+import type { Member } from '../types/index';
 
 export function ImportPage() {
   const [importHistory, setImportHistory] = useState<any[]>([]);
@@ -8,27 +9,46 @@ export function ImportPage() {
   const [results, setResults] = useState<{ message: string; success: boolean }[]>([]);
   const [stats, setStats] = useState({ total: 0, wechat: 0, alipay: 0 });
   const [reconcileResult, setReconcileResult] = useState<string | null>(null);
+  const [members, setMembers] = useState<Member[]>([]);
+  const [selectedMember, setSelectedMember] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
-    const history = await dataService.getImportHistory();
+    const [history, s, m] = await Promise.all([
+      dataService.getImportHistory(),
+      dataService.getStats(),
+      dataService.getMembers(),
+    ]);
     setImportHistory(history);
-    const s = await dataService.getStats();
     setStats(s);
+    setMembers(m);
+    if (m.length > 0 && selectedMember === null) setSelectedMember(m[0].id);
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
 
   const handleImport = async (filePaths: string[]) => {
+    if (!selectedMember) {
+      setResults([{ message: '请先选择成员', success: false }]);
+      return;
+    }
     setImporting(true);
     setResults([]);
     const newResults: { message: string; success: boolean }[] = [];
 
     for (const fp of filePaths) {
-      const result = await dataService.importFile(fp);
+      const result = await dataService.importFile(fp, selectedMember);
       newResults.push({ message: result.message, success: result.success });
     }
 
     setResults(newResults);
+
+    // 导入后自动执行对账
+    const hasSuccess = newResults.some(r => r.success);
+    if (hasSuccess) {
+      const r = await dataService.runReconciliation();
+      setReconcileResult(`对账完成：创建对账组 ${r.groupsCreated} 个，已匹配 ${r.matched} 条，未匹配 ${r.unmatched} 条`);
+    }
+
     setImporting(false);
     refresh();
   };
@@ -47,14 +67,39 @@ export function ImportPage() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
-    // Note: file.path only works in Electron
     const paths = Array.from(e.dataTransfer.files).map((f: any) => f.path).filter(Boolean);
     if (paths.length > 0) handleImport(paths);
   };
 
+  const memberMap = Object.fromEntries(members.map(m => [m.id, m.name]));
+
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-6">
       <h2 className="text-2xl font-bold text-gray-900">数据导入</h2>
+
+      {/* Member Selection */}
+      {members.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 p-4">
+          <div className="text-sm text-gray-500 mb-3">选择账单归属成员</div>
+          <div className="flex items-center gap-2">
+            {members.map(m => (
+              <button key={m.id} onClick={() => setSelectedMember(m.id)}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
+                  selectedMember === m.id
+                    ? 'text-white shadow-sm'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+                style={selectedMember === m.id ? { backgroundColor: m.color } : {}}>
+                <div className="w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold"
+                  style={selectedMember === m.id ? { backgroundColor: 'rgba(255,255,255,0.3)' } : { backgroundColor: m.color, color: 'white' }}>
+                  {m.name[0]}
+                </div>
+                {m.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Current DB Stats */}
       {stats.total > 0 && (
@@ -89,7 +134,7 @@ export function ImportPage() {
           {importing ? '导入中...' : '拖拽账单文件到这里，或点击下方按钮'}
         </p>
         <p className="text-sm text-gray-500 mt-2">支持格式：微信支付 (.xlsx) / 支付宝 (.csv)</p>
-        <button onClick={handleFileSelect} disabled={importing}
+        <button onClick={handleFileSelect} disabled={importing || !selectedMember}
           className="mt-4 px-6 py-2 bg-cat-500 text-white rounded-lg hover:bg-cat-600 transition font-medium text-sm disabled:opacity-50">
           选择文件
         </button>
@@ -143,6 +188,7 @@ export function ImportPage() {
             <thead>
               <tr className="bg-gray-50 text-gray-500">
                 <th className="px-5 py-2 text-left font-medium">时间</th>
+                <th className="px-5 py-2 text-left font-medium">成员</th>
                 <th className="px-5 py-2 text-left font-medium">来源</th>
                 <th className="px-5 py-2 text-left font-medium">文件</th>
                 <th className="px-5 py-2 text-right font-medium">记录数</th>
@@ -152,6 +198,11 @@ export function ImportPage() {
               {importHistory.map((item: any) => (
                 <tr key={item.id} className="hover:bg-gray-50">
                   <td className="px-5 py-3 text-gray-600">{item.imported_at}</td>
+                  <td className="px-5 py-3">
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
+                      {memberMap[item.member_id] || '未指定'}
+                    </span>
+                  </td>
                   <td className="px-5 py-3">
                     <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${item.source === 'wechat' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
                       {item.source === 'wechat' ? '微信' : '支付宝'}

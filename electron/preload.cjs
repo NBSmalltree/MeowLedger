@@ -13,17 +13,23 @@ contextBridge.exposeInMainWorld('meowLedger', {
   addTransaction: (txn) => ipcRenderer.invoke('add-transaction', txn),
 
   // 统计
-  getDashboardStats: (startDate, endDate) => ipcRenderer.invoke('get-dashboard-stats', startDate, endDate),
-  getMonthlySummary: () => ipcRenderer.invoke('get-monthly-summary'),
+  getDashboardStats: (startDate, endDate, memberId) => ipcRenderer.invoke('get-dashboard-stats', startDate, endDate, memberId),
+  getMonthlySummary: (memberId) => ipcRenderer.invoke('get-monthly-summary', memberId),
   getRefundChains: () => ipcRenderer.invoke('get-refund-chains'),
-  getStats: () => ipcRenderer.invoke('get-stats'),
+  getStats: (memberId) => ipcRenderer.invoke('get-stats', memberId),
+
+  // 成员管理
+  getMembers: () => ipcRenderer.invoke('get-members'),
+  addMember: (member) => ipcRenderer.invoke('add-member', member),
+  updateMember: (id, updates) => ipcRenderer.invoke('update-member', id, updates),
+  deleteMember: (id) => ipcRenderer.invoke('delete-member', id),
 
   // 分类
   getCategories: () => ipcRenderer.invoke('get-categories'),
   addCategoryRule: (rule) => ipcRenderer.invoke('add-category-rule', rule),
 
   // 导入
-  importFile: (filePath) => ipcRenderer.invoke('import-file', filePath),
+  importFile: (filePath, memberId) => ipcRenderer.invoke('import-file', filePath, memberId),
   openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
   getImportHistory: () => ipcRenderer.invoke('get-import-history'),
 

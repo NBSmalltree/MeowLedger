@@ -37,6 +37,12 @@ function getDb() {
 
 function initSchema(database) {
   database.exec(`
+    CREATE TABLE IF NOT EXISTS members (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      name            TEXT NOT NULL UNIQUE,
+      color           TEXT NOT NULL DEFAULT '#3b82f6',
+      created_at      TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    );
     CREATE TABLE IF NOT EXISTS transactions (
       id              INTEGER PRIMARY KEY AUTOINCREMENT,
       source          TEXT NOT NULL,
@@ -64,6 +70,7 @@ function initSchema(database) {
       reconcile_group_id TEXT,
       user_note       TEXT,
       is_hidden       INTEGER NOT NULL DEFAULT 0,
+      member_id       INTEGER REFERENCES members(id),
       created_at      TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
       updated_at      TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
       UNIQUE(source, platform_txn_id, trade_time)
@@ -97,6 +104,7 @@ function initSchema(database) {
       file_name       TEXT NOT NULL,
       file_hash       TEXT NOT NULL,
       record_count    INTEGER NOT NULL,
+      member_id       INTEGER REFERENCES members(id),
       imported_at     TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
       UNIQUE(file_hash)
     );
@@ -137,6 +145,20 @@ function initSchema(database) {
       ('counterparty', '花又', 'contains', '转账', 5),
       ('counterparty', '岐支', 'contains', '公共服务', 8);
   `);
+
+  // Migration: add member_id column if missing
+  try { database.exec('ALTER TABLE transactions ADD COLUMN member_id INTEGER REFERENCES members(id)'); } catch {}
+  try { database.exec('ALTER TABLE import_records ADD COLUMN member_id INTEGER REFERENCES members(id)'); } catch {}
+
+  // Phase 3: Create index + seed members
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_txn_member ON transactions(member_id);
+
+    INSERT INTO members (id, name, color)
+    SELECT 1, '成员一', '#3b82f6' WHERE NOT EXISTS (SELECT 1 FROM members);
+    INSERT INTO members (id, name, color)
+    SELECT 2, '成员二', '#ec4899' WHERE NOT EXISTS (SELECT 1 FROM members);
+  `);
 }
 
 // ============================================================
@@ -159,6 +181,7 @@ function registerIpcHandlers() {
     }
     if (filters?.isRefund !== undefined) { sql += ' AND is_refund = @isRefund'; params.isRefund = filters.isRefund; }
     if (filters?.reconcileStatus) { sql += ' AND reconcile_status = @reconcileStatus'; params.reconcileStatus = filters.reconcileStatus; }
+    if (filters?.memberId) { sql += ' AND member_id = @memberId'; params.memberId = filters.memberId; }
     if (filters?.startDate) { sql += ' AND trade_time >= @startDate'; params.startDate = filters.startDate; }
     if (filters?.endDate) { sql += ' AND trade_time <= @endDate'; params.endDate = filters.endDate + ' 23:59:59'; }
 
@@ -173,14 +196,15 @@ function registerIpcHandlers() {
     }
   });
 
-  // 获取仪表盘统计（支持时间范围参数）
-  ipcMain.handle('get-dashboard-stats', async (_event, startDate, endDate) => {
+  // 获取仪表盘统计（支持时间范围参数和成员过滤）
+  ipcMain.handle('get-dashboard-stats', async (_event, startDate, endDate, memberId) => {
     try {
     const database = getDb();
     let dateFilter = '';
     const params = {};
     if (startDate) { dateFilter += ' AND trade_time >= @startDate'; params.startDate = startDate; }
     if (endDate) { dateFilter += ' AND trade_time <= @endDate'; params.endDate = endDate + ' 23:59:59'; }
+    if (memberId) { dateFilter += ' AND member_id = @memberId'; params.memberId = memberId; }
 
     const basic = database.prepare(`
       SELECT
@@ -246,25 +270,63 @@ function registerIpcHandlers() {
       SELECT * FROM transactions WHERE (is_refund = 1 OR refund_amount > 0) AND is_hidden = 0 ORDER BY trade_time DESC
     `).all();
 
-    // 找出未关联的退款记录，补充查找其原支付记录
+    // 找出未关联的退款记录，用与对账引擎相同的策略补充查找原支付
+    const allPayments = database.prepare(`
+      SELECT * FROM transactions WHERE direction = 'expense' AND is_refund = 0 AND is_hidden = 0 ORDER BY trade_time DESC
+    `).all();
     const existingIds = new Set(refundTxns.map(t => t.id));
     const unmatchedRefunds = refundTxns.filter(t => t.is_refund === 1 && !t.reconcile_group_id);
-    const newlyLinked = []; // 记录新关联的 { refund, payment }
+    const newlyLinked = [];
+    const usedPaymentIds = new Set();
 
     for (const refund of unmatchedRefunds) {
-      if (!refund.counterparty) continue;
-      const candidate = database.prepare(`
-        SELECT * FROM transactions
-        WHERE counterparty = @counterparty AND direction = 'expense' AND is_refund = 0
-          AND is_hidden = 0 AND amount >= @amount AND trade_time < @refundTime
-        ORDER BY trade_time DESC LIMIT 1
-      `).get({ counterparty: refund.counterparty, amount: refund.amount, refundTime: refund.trade_time });
-      if (candidate && !existingIds.has(candidate.id)) {
-        const timeDiff = new Date(refund.trade_time).getTime() - new Date(candidate.trade_time).getTime();
-        if (timeDiff > 0 && timeDiff < 30 * 86400000) {
-          refundTxns.push(candidate);
-          newlyLinked.push({ refund, payment: candidate });
+      let bestMatch = null;
+
+      // 策略一：商户单号精确匹配
+      const refundMId = refund.merchant_txn_id || refund.merchant_order_id || '';
+      if (refundMId) {
+        bestMatch = allPayments.find(t =>
+          !usedPaymentIds.has(t.id) && t.id !== refund.id &&
+          (t.merchant_txn_id === refundMId || t.merchant_order_id === refundMId)
+        ) || null;
+      }
+
+      // 策略二：counterparty + 金额 + 时间窗口
+      if (!bestMatch && refund.counterparty) {
+        const refundTime = new Date(refund.trade_time).getTime();
+        const candidates = allPayments.filter(t => {
+          if (t.id === refund.id || usedPaymentIds.has(t.id)) return false;
+          if (t.counterparty !== refund.counterparty) return false;
+          if (refund.amount > t.amount) return false;
+          const payTime = new Date(t.trade_time).getTime();
+          return refundTime > payTime && (refundTime - payTime) < 30 * 86400000;
+        });
+        if (candidates.length > 0) {
+          bestMatch = candidates.reduce((c, curr) =>
+            Math.abs(new Date(curr.trade_time).getTime() - new Date(refund.trade_time).getTime()) <
+            Math.abs(new Date(c.trade_time).getTime() - new Date(refund.trade_time).getTime()) ? curr : c
+          );
         }
+      }
+
+      // 策略三：product_desc 模糊匹配
+      if (!bestMatch && refund.product_desc) {
+        const clean = refund.product_desc.replace(/^退款[-\s]*/, '');
+        if (clean.length > 2) {
+          const refundTime = new Date(refund.trade_time).getTime();
+          bestMatch = allPayments.find(t => {
+            if (t.id === refund.id || usedPaymentIds.has(t.id)) return false;
+            const pm = (t.product_desc || '').includes(clean) || (t.counterparty || '').includes(clean) || clean.includes(t.counterparty || '');
+            const tm = refundTime > new Date(t.trade_time).getTime() && (refundTime - new Date(t.trade_time).getTime()) < 30 * 86400000;
+            return pm && tm;
+          }) || null;
+        }
+      }
+
+      if (bestMatch && !existingIds.has(bestMatch.id)) {
+        refundTxns.push(bestMatch);
+        newlyLinked.push({ refund, payment: bestMatch });
+        usedPaymentIds.add(bestMatch.id);
       }
     }
 
@@ -314,7 +376,7 @@ function registerIpcHandlers() {
         });
       }
       const chain = chains.get(key);
-      chain.items.push({ txnId: txn.id, tradeTime: txn.trade_time, direction: txn.direction, amount: txn.amount, status: txn.status, source: txn.source, isRefund: txn.is_refund === 1 });
+      chain.items.push({ txnId: txn.id, tradeTime: txn.trade_time, direction: txn.direction, amount: txn.amount, status: txn.status, source: txn.source, isRefund: txn.is_refund === 1, memberId: txn.member_id });
       if (txn.is_refund === 1) chain.totalRefunded += txn.amount;
       else if (txn.direction === 'expense') chain.totalPaid += txn.amount;
     }
@@ -332,9 +394,10 @@ function registerIpcHandlers() {
   });
 
   // 获取月度汇总
-  ipcMain.handle('get-monthly-summary', async () => {
+  ipcMain.handle('get-monthly-summary', async (_event, memberId) => {
     try {
     const database = getDb();
+    const memberFilter = memberId ? ' AND member_id = ' + memberId : '';
     return database.prepare(`
       SELECT strftime('%Y-%m', trade_time) AS month, source, COUNT(*) AS txn_count,
         COALESCE(SUM(CASE WHEN direction = 'expense' THEN amount ELSE 0 END), 0) AS total_expense,
@@ -342,7 +405,7 @@ function registerIpcHandlers() {
         COALESCE(SUM(CASE WHEN is_refund = 1 THEN amount ELSE 0 END), 0) AS total_refund,
         COALESCE(SUM(CASE WHEN direction = 'expense' THEN amount ELSE 0 END)
           - SUM(CASE WHEN is_refund = 1 THEN amount ELSE 0 END), 0) AS net_expense
-      FROM transactions WHERE is_hidden = 0 AND direction != 'neutral'
+      FROM transactions WHERE is_hidden = 0 AND direction != 'neutral' ${memberFilter}
       GROUP BY strftime('%Y-%m', trade_time), source ORDER BY month DESC, source
     `).all();
     } catch (err) {
@@ -352,12 +415,13 @@ function registerIpcHandlers() {
   });
 
   // 获取数据库统计
-  ipcMain.handle('get-stats', async () => {
+  ipcMain.handle('get-stats', async (_event, memberId) => {
     try {
       const database = getDb();
-      const total = database.prepare('SELECT COUNT(*) as c FROM transactions').get();
-      const wechat = database.prepare("SELECT COUNT(*) as c FROM transactions WHERE source='wechat'").get();
-      const alipay = database.prepare("SELECT COUNT(*) as c FROM transactions WHERE source='alipay'").get();
+      const memberFilter = memberId ? ' WHERE member_id = ' + memberId : '';
+      const total = database.prepare(`SELECT COUNT(*) as c FROM transactions${memberFilter}`).get();
+      const wechat = database.prepare(`SELECT COUNT(*) as c FROM transactions${memberFilter ? memberFilter + ' AND' : ' WHERE'} source='wechat'`).get();
+      const alipay = database.prepare(`SELECT COUNT(*) as c FROM transactions${memberFilter ? memberFilter + ' AND' : ' WHERE'} source='alipay'`).get();
       return { total: total.c, wechat: wechat.c, alipay: alipay.c };
     } catch (err) {
       console.error('[MeowLedger] get-stats 错误:', err.message);
@@ -377,7 +441,7 @@ function registerIpcHandlers() {
   });
 
   // 导入文件
-  ipcMain.handle('import-file', async (_event, filePath) => {
+  ipcMain.handle('import-file', async (_event, filePath, memberId) => {
     try {
       const database = getDb();
       const crypto = require('crypto');
@@ -428,11 +492,11 @@ function registerIpcHandlers() {
         INSERT OR IGNORE INTO transactions (source, source_file, trade_time, trade_type, category,
           counterparty, counterparty_account, product_desc, direction, amount, net_amount,
           payment_method, status, is_refund, refund_amount, platform_txn_id, merchant_txn_id,
-          platform_order_id, merchant_order_id, remark, reconcile_status)
+          platform_order_id, merchant_order_id, remark, reconcile_status, member_id)
         VALUES (@source, @source_file, @trade_time, @trade_type, @category,
           @counterparty, @counterparty_account, @product_desc, @direction, @amount, @net_amount,
           @payment_method, @status, @is_refund, @refund_amount, @platform_txn_id, @merchant_txn_id,
-          @platform_order_id, @merchant_order_id, @remark, @reconcile_status)
+          @platform_order_id, @merchant_order_id, @remark, @reconcile_status, @member_id)
       `);
 
       const insertMany = database.transaction((items) => {
@@ -448,6 +512,7 @@ function registerIpcHandlers() {
             merchant_txn_id: t.merchant_txn_id || null, platform_order_id: t.platform_order_id || null,
             merchant_order_id: t.merchant_order_id || null, remark: t.remark || null,
             reconcile_status: t.reconcile_status || 'unmatched',
+            member_id: memberId || null,
           });
           if (r.changes > 0) count++;
         }
@@ -456,8 +521,8 @@ function registerIpcHandlers() {
 
       const imported = insertMany(txns);
 
-      database.prepare('INSERT OR IGNORE INTO import_records (source, file_name, file_hash, record_count) VALUES (?,?,?,?)')
-        .run(source, fileName, fileHash, imported);
+      database.prepare('INSERT OR IGNORE INTO import_records (source, file_name, file_hash, record_count, member_id) VALUES (?,?,?,?,?)')
+        .run(source, fileName, fileHash, imported, memberId || null);
 
       return { success: true, message: `成功导入 ${imported}/${txns.length} 条记录`, imported, total: txns.length, source };
     } catch (err) {
@@ -583,7 +648,7 @@ function registerIpcHandlers() {
     try {
       const database = getDb();
       const allowed = ['category', 'direction', 'net_amount', 'refund_amount', 'is_refund',
-        'reconcile_status', 'reconcile_group_id', 'user_note', 'is_hidden'];
+        'reconcile_status', 'reconcile_group_id', 'user_note', 'is_hidden', 'member_id'];
       const sets = [];
       const params = { id };
       for (const [key, value] of Object.entries(updates)) {
@@ -620,6 +685,7 @@ function registerIpcHandlers() {
       const ws1 = workbook.addWorksheet('交易明细');
       ws1.columns = [
         { header: '交易时间', key: 'trade_time', width: 20 },
+        { header: '成员', key: 'member_name', width: 10 },
         { header: '来源', key: 'source', width: 8 },
         { header: '交易类型', key: 'trade_type', width: 12 },
         { header: '交易对方', key: 'counterparty', width: 20 },
@@ -638,9 +704,15 @@ function registerIpcHandlers() {
       headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF49044' } };
       ws1.autoFilter = 'A1:L1';
 
+      // 构建成员ID到名称映射
+      const members = database.prepare('SELECT * FROM members').all();
+      const memberMap = {};
+      for (const m of members) memberMap[m.id] = m.name;
+
       for (const txn of txns) {
         const row = ws1.addRow({
           trade_time: txn.trade_time,
+          member_name: memberMap[txn.member_id] || '未指定',
           source: txn.source === 'wechat' ? '微信' : '支付宝',
           trade_type: txn.trade_type,
           counterparty: txn.counterparty,
@@ -723,10 +795,10 @@ function registerIpcHandlers() {
       const result = database.prepare(`
         INSERT INTO transactions (source, trade_time, trade_type, category, counterparty,
           product_desc, direction, amount, net_amount, payment_method, status,
-          is_refund, refund_amount, remark, reconcile_status)
+          is_refund, refund_amount, remark, reconcile_status, member_id)
         VALUES (@source, @trade_time, @trade_type, @category, @counterparty,
           @product_desc, @direction, @amount, @net_amount, @payment_method, @status,
-          @is_refund, @refund_amount, @remark, @reconcile_status)
+          @is_refund, @refund_amount, @remark, @reconcile_status, @member_id)
       `).run({
         source: txn.source || 'manual',
         trade_time: txn.trade_time,
@@ -743,11 +815,66 @@ function registerIpcHandlers() {
         refund_amount: 0,
         remark: txn.remark || null,
         reconcile_status: 'matched',
+        member_id: txn.member_id || null,
       });
       return { success: true, id: Number(result.lastInsertRowid) };
     } catch (err) {
       console.error('[MeowLedger] add-transaction 错误:', err.message);
       return { success: false, id: null };
+    }
+  });
+
+  // ============================================================
+  // 成员管理
+  // ============================================================
+
+  ipcMain.handle('get-members', async () => {
+    try {
+      const database = getDb();
+      return database.prepare('SELECT * FROM members ORDER BY id').all();
+    } catch (err) {
+      console.error('[MeowLedger] get-members 错误:', err.message);
+      return [];
+    }
+  });
+
+  ipcMain.handle('add-member', async (_event, member) => {
+    try {
+      const database = getDb();
+      const result = database.prepare('INSERT INTO members (name, color) VALUES (?, ?)').run(member.name, member.color);
+      return { success: result.changes > 0, id: result.changes > 0 ? Number(result.lastInsertRowid) : null };
+    } catch (err) {
+      console.error('[MeowLedger] add-member 错误:', err.message);
+      return { success: false, id: null };
+    }
+  });
+
+  ipcMain.handle('update-member', async (_event, id, updates) => {
+    try {
+      const database = getDb();
+      const sets = [];
+      const params = { id };
+      if (updates.name) { sets.push('name = @name'); params.name = updates.name; }
+      if (updates.color) { sets.push('color = @color'); params.color = updates.color; }
+      if (sets.length === 0) return true;
+      database.prepare(`UPDATE members SET ${sets.join(', ')} WHERE id = @id`).run(params);
+      return true;
+    } catch (err) {
+      console.error('[MeowLedger] update-member 错误:', err.message);
+      return false;
+    }
+  });
+
+  ipcMain.handle('delete-member', async (_event, id) => {
+    try {
+      const database = getDb();
+      const count = database.prepare('SELECT COUNT(*) as c FROM transactions WHERE member_id = ?').get(id);
+      if (count.c > 0) return { success: false, hasTransactions: true };
+      database.prepare('DELETE FROM members WHERE id = ?').run(id);
+      return { success: true, hasTransactions: false };
+    } catch (err) {
+      console.error('[MeowLedger] delete-member 错误:', err.message);
+      return { success: false, hasTransactions: false };
     }
   });
 

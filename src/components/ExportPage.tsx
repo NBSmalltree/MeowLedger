@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { dataService } from '../services/data-service';
+import type { Member } from '../types/index';
 
 export function ExportPage() {
   const [startDate, setStartDate] = useState('2026-05-01');
@@ -7,8 +8,12 @@ export function ExportPage() {
   const [includeRefunds, setIncludeRefunds] = useState(true);
   const [netMode, setNetMode] = useState(true);
   const [sourceFilter, setSourceFilter] = useState<'all' | 'wechat' | 'alipay'>('all');
+  const [memberFilter, setMemberFilter] = useState<string>('all');
   const [exporting, setExporting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [members, setMembers] = useState<Member[]>([]);
+
+  useEffect(() => { dataService.getMembers().then(setMembers); }, []);
 
   const handleExport = async () => {
     setExporting(true);
@@ -17,10 +22,11 @@ export function ExportPage() {
     const sources = sourceFilter === 'all' ? undefined : [sourceFilter];
     const result = await dataService.exportExcel({
       startDate, endDate, sources, includeRefunds, netMode,
+      memberId: memberFilter === 'all' ? undefined : parseInt(memberFilter),
     });
 
     setExporting(false);
-   setMessage(result.message);
+    setMessage(result.message);
   };
 
   return (
@@ -39,6 +45,26 @@ export function ExportPage() {
               className="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-cat-400" />
           </div>
         </div>
+
+        {/* Member Filter */}
+        {members.length > 0 && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">成员筛选</label>
+            <div className="flex bg-gray-100 rounded-lg p-0.5 w-fit">
+              <button onClick={() => setMemberFilter('all')}
+                className={`px-4 py-1.5 text-sm rounded-md transition ${memberFilter === 'all' ? 'bg-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-700'}`}>
+                全部
+              </button>
+              {members.map(m => (
+                <button key={m.id} onClick={() => setMemberFilter(String(m.id))}
+                  className={`px-4 py-1.5 text-sm rounded-md transition flex items-center gap-1.5 ${memberFilter === String(m.id) ? 'bg-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-700'}`}>
+                  <span className="w-3 h-3 rounded-full inline-block" style={{ backgroundColor: m.color }} />
+                  {m.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Source Filter */}
         <div>
@@ -77,7 +103,7 @@ export function ExportPage() {
         <div className="bg-gray-50 rounded-lg p-4">
           <h4 className="text-sm font-medium text-gray-700 mb-2">导出内容预览</h4>
           <ul className="text-xs text-gray-500 space-y-1">
-            <li>📄 Sheet 1: 交易明细（含来源、分类、轧差净额等）</li>
+            <li>📄 Sheet 1: 交易明细（含成员、来源、分类、轧差净额等）</li>
             <li>📄 Sheet 2: 月度汇总（按来源分组）</li>
             {includeRefunds && <li>📄 Sheet 3: 退款明细（退款链路追踪）</li>}
           </ul>

@@ -31,6 +31,7 @@ export async function exportToExcel(
   const ws1 = workbook.addWorksheet('交易明细');
   ws1.columns = [
     { header: '交易时间', key: 'trade_time', width: 20 },
+    { header: '成员', key: 'member_name', width: 10 },
     { header: '来源', key: 'source', width: 8 },
     { header: '交易类型', key: 'trade_type', width: 12 },
     { header: '交易对方', key: 'counterparty', width: 20 },
@@ -48,9 +49,17 @@ export async function exportToExcel(
   // 设置表头样式
   styleHeader(ws1);
 
+  // 构建成员映射
+  const members = db.getMembers();
+  const memberMap = new Map<number, string>();
+  for (const m of members) {
+    if (m.id) memberMap.set(m.id, m.name);
+  }
+
   for (const txn of txns) {
     const row = ws1.addRow({
       trade_time: txn.trade_time,
+      member_name: memberMap.get(txn.member_id || 0) || '未指定',
       source: txn.source === 'wechat' ? '微信' : '支付宝',
       trade_type: txn.trade_type,
       counterparty: txn.counterparty,

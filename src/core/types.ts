@@ -15,6 +15,14 @@ export type ReconcileStatus =
   | 'manual_matched' // 手动匹配
   | 'discrepancy';   // 有差异
 
+/** 家庭成员 */
+export interface Member {
+  id?: number;
+  name: string;
+  color: string;
+  created_at?: string;
+}
+
 /** 统一交易记录 */
 export interface Transaction {
   id?: number;
@@ -43,6 +51,7 @@ export interface Transaction {
   reconcile_group_id?: string;
   user_note?: string;
   is_hidden: number;        // 0 or 1
+  member_id?: number;       // 家庭成员
   created_at?: string;
   updated_at?: string;
 }
@@ -132,6 +141,8 @@ export interface RefundChain {
   groupStatus: string;
   counterparty: string;
   productDesc: string;
+  memberId?: number;
+  memberName?: string;
   items: {
     txnId: number;
     tradeTime: string;
@@ -140,6 +151,7 @@ export interface RefundChain {
     status: string;
     source: Source;
     isRefund: boolean;
+    memberId?: number;
   }[];
   totalPaid: number;
   totalRefunded: number;

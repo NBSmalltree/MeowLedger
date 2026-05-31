@@ -1,6 +1,6 @@
 // ============================================================
 // 喵喵账本 - CLI: 数据导入
-// 用法: npx tsx src/core/cli-import.ts <file1> [file2] ...
+// 用法: npx tsx src/core/cli-import.ts <file1> [file2] ... [--member <name>]
 // ============================================================
 
 import path from 'path';
@@ -14,12 +14,26 @@ import type { Source } from './types.js';
 async function main() {
   const args = process.argv.slice(2);
   if (args.length === 0) {
-    console.log('用法: npx tsx src/core/cli-import.ts <文件路径1> [文件路径2] ...');
+    console.log('用法: npx tsx src/core/cli-import.ts <文件路径1> [文件路径2] ... [--member <成员名>]');
     console.log('');
     console.log('支持的文件格式:');
     console.log('  微信支付: .xlsx 文件');
     console.log('  支付宝:   .csv 文件');
+    console.log('');
+    console.log('选项:');
+    console.log('  --member <名称>  指定交易归属的成员');
     process.exit(1);
+  }
+
+  // Parse --member flag
+  let memberName: string | null = null;
+  const files: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--member' && i + 1 < args.length) {
+      memberName = args[++i];
+    } else {
+      files.push(args[i]);
+    }
   }
 
   const dbPath = path.join(process.cwd(), 'meowledger.db');
@@ -28,9 +42,23 @@ async function main() {
   console.log('🐱 喵喵账本 - 数据导入');
   console.log('═'.repeat(50));
   console.log(`数据库: ${dbPath}`);
+
+  // Resolve member
+  let memberId: number | undefined;
+  if (memberName) {
+    const members = db.getMembers();
+    const member = members.find(m => m.name === memberName);
+    if (member) {
+      memberId = member.id;
+      console.log(`成员: ${member.name} (ID: ${member.id})`);
+    } else {
+      console.log(`⚠️  未找到成员"${memberName}"，将作为未指定成员导入`);
+      console.log(`   可用成员: ${members.map(m => m.name).join(', ')}`);
+    }
+  }
   console.log('');
 
-  for (const filePath of args) {
+  for (const filePath of files) {
     const absPath = path.resolve(filePath);
     const fileName = path.basename(absPath);
     const ext = path.extname(absPath).toLowerCase();
@@ -66,9 +94,10 @@ async function main() {
         continue;
       }
 
-      // 标记来源文件
+      // 标记来源文件和成员
       for (const txn of txns) {
         txn.source_file = fileName;
+        txn.member_id = memberId;
         // 处理空分类
         if (!txn.category || txn.category === '') {
           txn.category = db.autoClassify(txn) || '未分类';
@@ -79,9 +108,9 @@ async function main() {
       const imported = db.insertTransactionsBatch(txns);
 
       // 记录导入
-      db.recordImport(source, fileName, fileHash, imported);
+      db.recordImport(source, fileName, fileHash, imported, memberId);
 
-      const stats = db.getStats();
+      const stats = db.getStats(memberId);
       console.log(`✅ 导入成功: ${imported}/${txns.length} 条记录`);
       console.log(`   退款记录: ${txns.filter(t => t.is_refund === 1).length} 条`);
       console.log(`   数据库合计: ${stats.total} 条 (微信: ${stats.wechat}, 支付宝: ${stats.alipay})`);

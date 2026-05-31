@@ -5,7 +5,7 @@
 
 import type {
   Transaction, DashboardStats, RefundChain,
-  MonthlySummary, Source, Direction
+  MonthlySummary, Source, Direction, Member
 } from '../types/index';
 
 // ============================================================
@@ -16,11 +16,11 @@ declare global {
   interface Window {
     meowLedger?: {
       getTransactions: (filters?: any) => Promise<Transaction[]>;
-      getDashboardStats: (startDate?: string, endDate?: string) => Promise<DashboardStats>;
-      getMonthlySummary: () => Promise<MonthlySummary[]>;
+      getDashboardStats: (startDate?: string, endDate?: string, memberId?: number) => Promise<DashboardStats>;
+      getMonthlySummary: (memberId?: number) => Promise<MonthlySummary[]>;
       getRefundChains: () => Promise<RefundChain[]>;
-      getStats: () => Promise<{ total: number; wechat: number; alipay: number }>;
-      importFile: (path: string) => Promise<{ success: boolean; message: string; imported: number }>;
+      getStats: (memberId?: number) => Promise<{ total: number; wechat: number; alipay: number }>;
+      importFile: (path: string, memberId?: number) => Promise<{ success: boolean; message: string; imported: number }>;
       openFileDialog: () => Promise<string[]>;
       getImportHistory: () => Promise<any[]>;
       exportExcel: (options: any) => Promise<{ success: boolean; message: string; path?: string }>;
@@ -31,6 +31,10 @@ declare global {
       addTransaction: (txn: any) => Promise<{ success: boolean; id: number | null }>;
       getCategories: () => Promise<string[]>;
       addCategoryRule: (rule: any) => Promise<boolean>;
+      getMembers: () => Promise<Member[]>;
+      addMember: (member: { name: string; color: string }) => Promise<{ success: boolean; id: number | null }>;
+      updateMember: (id: number, updates: { name?: string; color?: string }) => Promise<boolean>;
+      deleteMember: (id: number) => Promise<{ success: boolean; hasTransactions: boolean }>;
     };
   }
 }
@@ -44,29 +48,29 @@ const isElectron = typeof window !== 'undefined' && !!window.meowLedger;
 const electronBackend = {
   async getTransactions(filters?: {
     source?: Source; direction?: Direction; search?: string; isRefund?: number;
-    reconcileStatus?: string; startDate?: string; endDate?: string;
+    reconcileStatus?: string; memberId?: number; startDate?: string; endDate?: string;
   }): Promise<Transaction[]> {
     return window.meowLedger!.getTransactions(filters);
   },
 
-  async getDashboardStats(startDate?: string, endDate?: string): Promise<DashboardStats> {
-    return window.meowLedger!.getDashboardStats(startDate, endDate);
+  async getDashboardStats(startDate?: string, endDate?: string, memberId?: number): Promise<DashboardStats> {
+    return window.meowLedger!.getDashboardStats(startDate, endDate, memberId);
   },
 
   async getRefundChains(): Promise<RefundChain[]> {
     return window.meowLedger!.getRefundChains();
   },
 
-  async getMonthlySummary(): Promise<MonthlySummary[]> {
-    return window.meowLedger!.getMonthlySummary();
+  async getMonthlySummary(memberId?: number): Promise<MonthlySummary[]> {
+    return window.meowLedger!.getMonthlySummary(memberId);
   },
 
-  async getStats() {
-    return window.meowLedger!.getStats();
+  async getStats(memberId?: number) {
+    return window.meowLedger!.getStats(memberId);
   },
 
-  async importFile(filePath: string) {
-    return window.meowLedger!.importFile(filePath);
+  async importFile(filePath: string, memberId?: number) {
+    return window.meowLedger!.importFile(filePath, memberId);
   },
 
   async openFileDialog(): Promise<string[]> {
@@ -107,6 +111,22 @@ const electronBackend = {
 
   async addCategoryRule(rule: any) {
     return window.meowLedger!.addCategoryRule(rule);
+  },
+
+  async getMembers(): Promise<Member[]> {
+    return window.meowLedger!.getMembers();
+  },
+
+  async addMember(member: { name: string; color: string }) {
+    return window.meowLedger!.addMember(member);
+  },
+
+  async updateMember(id: number, updates: { name?: string; color?: string }) {
+    return window.meowLedger!.updateMember(id, updates);
+  },
+
+  async deleteMember(id: number) {
+    return window.meowLedger!.deleteMember(id);
   },
 };
 
@@ -208,6 +228,15 @@ const mockBackend = {
   async addTransaction() { return { success: true, id: 999 }; },
   async getCategories() { return ['公共服务-电费', '交通-停车', '交通-充电', '电商-拼多多', '电商-淘宝', '餐饮-外卖', '餐饮', '线下消费', '转账', '理财', '退款', '其他']; },
   async addCategoryRule() { return true; },
+  async getMembers(): Promise<Member[]> {
+    return [
+      { id: 1, name: '锐彬', color: '#3b82f6' },
+      { id: 2, name: '老婆', color: '#ec4899' },
+    ];
+  },
+  async addMember() { return { success: true, id: 3 }; },
+  async updateMember() { return true; },
+  async deleteMember() { return { success: true, hasTransactions: false }; },
 };
 
 // ============================================================
