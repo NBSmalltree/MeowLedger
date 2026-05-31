@@ -158,6 +158,7 @@ function registerIpcHandlers() {
       params.search = `%${filters.search}%`;
     }
     if (filters?.isRefund !== undefined) { sql += ' AND is_refund = @isRefund'; params.isRefund = filters.isRefund; }
+    if (filters?.reconcileStatus) { sql += ' AND reconcile_status = @reconcileStatus'; params.reconcileStatus = filters.reconcileStatus; }
     if (filters?.startDate) { sql += ' AND trade_time >= @startDate'; params.startDate = filters.startDate; }
     if (filters?.endDate) { sql += ' AND trade_time <= @endDate'; params.endDate = filters.endDate + ' 23:59:59'; }
 
@@ -240,9 +241,68 @@ function registerIpcHandlers() {
   ipcMain.handle('get-refund-chains', async () => {
     try {
     const database = getDb();
+    const crypto = require('crypto');
     const refundTxns = database.prepare(`
       SELECT * FROM transactions WHERE (is_refund = 1 OR refund_amount > 0) AND is_hidden = 0 ORDER BY trade_time DESC
     `).all();
+
+    // 找出未关联的退款记录，补充查找其原支付记录
+    const existingIds = new Set(refundTxns.map(t => t.id));
+    const unmatchedRefunds = refundTxns.filter(t => t.is_refund === 1 && !t.reconcile_group_id);
+    const newlyLinked = []; // 记录新关联的 { refund, payment }
+
+    for (const refund of unmatchedRefunds) {
+      if (!refund.counterparty) continue;
+      const candidate = database.prepare(`
+        SELECT * FROM transactions
+        WHERE counterparty = @counterparty AND direction = 'expense' AND is_refund = 0
+          AND is_hidden = 0 AND amount >= @amount AND trade_time < @refundTime
+        ORDER BY trade_time DESC LIMIT 1
+      `).get({ counterparty: refund.counterparty, amount: refund.amount, refundTime: refund.trade_time });
+      if (candidate && !existingIds.has(candidate.id)) {
+        const timeDiff = new Date(refund.trade_time).getTime() - new Date(candidate.trade_time).getTime();
+        if (timeDiff > 0 && timeDiff < 30 * 86400000) {
+          refundTxns.push(candidate);
+          newlyLinked.push({ refund, payment: candidate });
+        }
+      }
+    }
+
+    // 将新关联的记录写入数据库（创建对账组 + 更新状态）
+    const updateStmt = database.prepare(`
+      UPDATE transactions SET reconcile_status=@rs, reconcile_group_id=@rg,
+      refund_amount=@ra, net_amount=@na, updated_at=datetime('now','localtime') WHERE id=@id
+    `);
+    const groupStmt = database.prepare(`
+      INSERT OR REPLACE INTO reconcile_groups (id,original_txn_id,total_paid,total_refunded,net_amount,
+      refund_count,status,counterparty,product_desc,first_trade_time,last_trade_time)
+      VALUES (@id,@original_txn_id,@total_paid,@total_refunded,@net_amount,@refund_count,@status,
+      @counterparty,@product_desc,@first_trade_time,@last_trade_time)
+    `);
+
+    for (const { refund, payment } of newlyLinked) {
+      const groupId = crypto.randomUUID();
+      const netAmt = payment.amount - refund.amount;
+      const st = netAmt <= 0.001 ? 'fully_refunded' : 'partial_refund';
+
+      groupStmt.run({
+        id: groupId, original_txn_id: payment.id, total_paid: payment.amount,
+        total_refunded: refund.amount, net_amount: netAmt, refund_count: 1, status: st,
+        counterparty: refund.counterparty, product_desc: payment.product_desc,
+        first_trade_time: payment.trade_time, last_trade_time: refund.trade_time,
+      });
+
+      // 更新退款记录
+      updateStmt.run({ id: refund.id, rs: 'matched', rg: groupId, ra: refund.amount, na: 0 });
+      // 更新原支付记录
+      updateStmt.run({ id: payment.id, rs: st === 'fully_refunded' ? 'matched' : 'discrepancy', rg: groupId, ra: refund.amount, na: netAmt });
+
+      // 同步到内存中的 txn 对象，让后续链路构建用正确的 group id
+      refund.reconcile_group_id = groupId;
+      refund.reconcile_status = 'matched';
+      payment.reconcile_group_id = groupId;
+      payment.reconcile_status = st === 'fully_refunded' ? 'matched' : 'discrepancy';
+    }
 
     const chains = new Map();
     for (const txn of refundTxns) {
@@ -522,7 +582,8 @@ function registerIpcHandlers() {
   ipcMain.handle('update-transaction', async (_event, id, updates) => {
     try {
       const database = getDb();
-      const allowed = ['category', 'direction', 'net_amount', 'reconcile_status', 'user_note', 'is_hidden'];
+      const allowed = ['category', 'direction', 'net_amount', 'refund_amount', 'is_refund',
+        'reconcile_status', 'reconcile_group_id', 'user_note', 'is_hidden'];
       const sets = [];
       const params = { id };
       for (const [key, value] of Object.entries(updates)) {

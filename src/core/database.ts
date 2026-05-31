@@ -4,6 +4,7 @@
 
 import Database from 'better-sqlite3';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import type {
   Transaction, Source, Direction, ReconcileStatus,
@@ -313,8 +314,8 @@ export class MeowDB {
   // ============================================================
 
   updateTransaction(id: number, updates: Partial<Transaction>): void {
-    const allowed = ['category', 'direction', 'net_amount', 'reconcile_status',
-      'reconcile_group_id', 'user_note', 'is_hidden'];
+    const allowed = ['category', 'direction', 'net_amount', 'refund_amount', 'is_refund',
+      'reconcile_status', 'reconcile_group_id', 'user_note', 'is_hidden'];
     const sets: string[] = [];
     const params: Record<string, any> = { id };
 
@@ -456,18 +457,92 @@ export class MeowDB {
   // ============================================================
 
   getRefundChains(): RefundChain[] {
-    // Get transactions involved in refunds (both payments and refund records)
-    const refundTxns = this.db.prepare(`
+    // Step 1: Get all refund records and original payments with refund info
+    const refundRelatedTxns = this.db.prepare(`
       SELECT * FROM transactions
       WHERE (is_refund = 1 OR refund_amount > 0)
         AND is_hidden = 0
       ORDER BY trade_time DESC
     `).all() as Transaction[];
 
-    // Group by counterparty + time proximity
+    // Step 2: Find unmatched refunds and look up their original payments
+    const allUnmatchedRefunds = refundRelatedTxns.filter(t => t.is_refund === 1 && !t.reconcile_group_id);
+    const newlyLinked: { refund: Transaction; payment: Transaction }[] = [];
+
+    if (allUnmatchedRefunds.length > 0) {
+      const existingIds = new Set(refundRelatedTxns.map(t => t.id));
+      const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+
+      for (const refund of allUnmatchedRefunds) {
+        if (!refund.counterparty) continue;
+        const refundTime = new Date(refund.trade_time).getTime();
+
+        const candidate = this.db.prepare(`
+          SELECT * FROM transactions
+          WHERE counterparty = @counterparty
+            AND direction = 'expense'
+            AND is_refund = 0
+            AND is_hidden = 0
+            AND amount >= @amount
+            AND trade_time < @refundTime
+          ORDER BY trade_time DESC
+        `).get({
+          counterparty: refund.counterparty,
+          amount: refund.amount,
+          refundTime: refund.trade_time,
+        }) as Transaction | undefined;
+
+        if (candidate && existingIds.has(candidate.id) === false) {
+          const timeDiff = refundTime - new Date(candidate.trade_time).getTime();
+          if (timeDiff > 0 && timeDiff < thirtyDaysMs) {
+            refundRelatedTxns.push(candidate);
+            newlyLinked.push({ refund, payment: candidate });
+          }
+        }
+      }
+    }
+
+    // Step 2.5: Write newly linked records to database
+    if (newlyLinked.length > 0) {
+      const updateStmt = this.db.prepare(`
+        UPDATE transactions SET reconcile_status=@rs, reconcile_group_id=@rg,
+        refund_amount=@ra, net_amount=@na, updated_at=datetime('now','localtime') WHERE id=@id
+      `);
+      const groupStmt = this.db.prepare(`
+        INSERT OR REPLACE INTO reconcile_groups (id,original_txn_id,total_paid,total_refunded,net_amount,
+        refund_count,status,counterparty,product_desc,first_trade_time,last_trade_time)
+        VALUES (@id,@original_txn_id,@total_paid,@total_refunded,@net_amount,@refund_count,@status,
+        @counterparty,@product_desc,@first_trade_time,@last_trade_time)
+      `);
+
+      for (const { refund, payment } of newlyLinked) {
+        const groupId = crypto.randomUUID();
+        const netAmt = payment.amount - refund.amount;
+        const st = netAmt <= 0.001 ? 'fully_refunded' : 'partial_refund';
+
+        groupStmt.run({
+          id: groupId, original_txn_id: payment.id!, total_paid: payment.amount,
+          total_refunded: refund.amount, net_amount: netAmt, refund_count: 1, status: st,
+          counterparty: refund.counterparty, product_desc: payment.product_desc,
+          first_trade_time: payment.trade_time, last_trade_time: refund.trade_time,
+        });
+
+        updateStmt.run({ id: refund.id, rs: 'matched', rg: groupId, ra: refund.amount, na: 0 });
+        updateStmt.run({
+          id: payment.id, rs: st === 'fully_refunded' ? 'matched' : 'discrepancy',
+          rg: groupId, ra: refund.amount, na: netAmt,
+        });
+
+        refund.reconcile_group_id = groupId;
+        refund.reconcile_status = 'matched';
+        payment.reconcile_group_id = groupId;
+      }
+    }
+
+    // Step 3: Group by reconcile_group_id or counterparty+source
     const chains = new Map<string, RefundChain>();
 
-    for (const txn of refundTxns) {
+    for (const txn of refundRelatedTxns) {
       const key = txn.reconcile_group_id || `${txn.counterparty}-${txn.source}`;
       if (!chains.has(key)) {
         chains.set(key, {

@@ -44,6 +44,7 @@ const isElectron = typeof window !== 'undefined' && !!window.meowLedger;
 const electronBackend = {
   async getTransactions(filters?: {
     source?: Source; direction?: Direction; search?: string; isRefund?: number;
+    reconcileStatus?: string; startDate?: string; endDate?: string;
   }): Promise<Transaction[]> {
     return window.meowLedger!.getTransactions(filters);
   },
@@ -139,6 +140,7 @@ const mockBackend = {
       data = data.filter(t => (t.counterparty || '').toLowerCase().includes(s) || (t.product_desc || '').toLowerCase().includes(s));
     }
     if (filters?.isRefund !== undefined) data = data.filter(t => t.is_refund === filters.isRefund);
+    if (filters?.reconcileStatus) data = data.filter(t => t.reconcile_status === filters.reconcileStatus);
     return data.sort((a, b) => b.trade_time.localeCompare(a.trade_time));
   },
 

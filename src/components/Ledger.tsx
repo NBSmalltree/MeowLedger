@@ -151,7 +151,8 @@ export function Ledger() {
           <tbody className="divide-y divide-gray-100">
             {txns.map(txn => (
               <tr key={txn.id}
-                className={`hover:bg-gray-50 transition ${txn.is_refund ? 'bg-green-50/30' : ''} ${selected.has(txn.id) ? 'bg-blue-50/30' : ''}`}>
+                className={`hover:bg-gray-50 transition cursor-pointer ${txn.is_refund ? 'bg-green-50/30' : ''} ${selected.has(txn.id) ? 'bg-blue-50/30' : ''}`}
+                onDoubleClick={() => setEditingTxn(txn)}>
                 <td className="px-3 py-2.5">
                   <input type="checkbox" checked={selected.has(txn.id)} onChange={() => toggleSelect(txn.id)}
                     className="w-4 h-4 rounded border-gray-300 text-cat-500" />

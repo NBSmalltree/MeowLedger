@@ -1,17 +1,28 @@
 import { useState, useEffect } from 'react';
 import { dataService } from '../services/data-service';
-import type { RefundChain } from '../types/index';
+import type { RefundChain, Transaction } from '../types/index';
 
 const sourceLabels: Record<string, string> = { wechat: '微信', alipay: '支付宝' };
 
 export function Reconcile() {
   const [chains, setChains] = useState<RefundChain[]>([]);
   const [stats, setStats] = useState<{ unmatched: number; discrepancy: number }>({ unmatched: 0, discrepancy: 0 });
+  const [showPending, setShowPending] = useState(false);
+  const [pendingTxns, setPendingTxns] = useState<Transaction[]>([]);
 
   useEffect(() => {
     dataService.getRefundChains().then(setChains);
     dataService.getDashboardStats().then(s => setStats({ unmatched: s.unmatchedCount, discrepancy: s.discrepancyCount }));
   }, []);
+
+  const loadPendingTxns = async () => {
+    const [unmatched, discrepancy] = await Promise.all([
+      dataService.getTransactions({ reconcileStatus: 'unmatched' }),
+      dataService.getTransactions({ reconcileStatus: 'discrepancy' }),
+    ]);
+    setPendingTxns([...unmatched, ...discrepancy].sort((a, b) => b.trade_time.localeCompare(a.trade_time)));
+    setShowPending(true);
+  };
 
   const statusLabels: Record<string, { label: string; color: string; icon: string }> = {
     fully_refunded: { label: '全额退款', color: 'bg-green-100 text-green-700', icon: '✅' },
@@ -38,14 +49,72 @@ export function Reconcile() {
           </div>
           <div className="text-xs text-gray-400 mt-1">已关联的退款金额</div>
         </div>
-        <div className={`rounded-xl border p-5 ${stats.unmatched > 0 ? 'bg-red-50 border-red-200' : 'bg-white border-gray-200'}`}>
+        <div
+          className={`rounded-xl border p-5 cursor-pointer transition-all hover:shadow-md ${stats.unmatched + stats.discrepancy > 0 ? 'bg-red-50 border-red-200 hover:bg-red-100' : 'bg-white border-gray-200'}`}
+          onClick={() => { if (showPending) { setShowPending(false); } else { loadPendingTxns(); } }}
+        >
           <div className="text-sm text-gray-500">待处理</div>
-          <div className={`text-3xl font-bold mt-1 ${stats.unmatched > 0 ? 'text-red-600' : 'text-gray-900'}`}>
+          <div className={`text-3xl font-bold mt-1 ${stats.unmatched + stats.discrepancy > 0 ? 'text-red-600' : 'text-gray-900'}`}>
             {stats.unmatched + stats.discrepancy} 笔
           </div>
-          <div className="text-xs text-gray-400 mt-1">未匹配或有差异</div>
+          <div className="text-xs text-gray-400 mt-1">{showPending ? '点击收起' : '未匹配或有差异，点击查看详情'}</div>
         </div>
       </div>
+
+      {/* Pending Transactions Detail */}
+      {showPending && pendingTxns.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-gray-800">待处理交易明细</h3>
+            <button
+              className="text-sm text-gray-400 hover:text-gray-600"
+              onClick={() => setShowPending(false)}
+            >
+              收起
+            </button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-100">
+                  <th className="text-left py-2 px-2 text-gray-500 font-medium">时间</th>
+                  <th className="text-left py-2 px-2 text-gray-500 font-medium">来源</th>
+                  <th className="text-left py-2 px-2 text-gray-500 font-medium">对方</th>
+                  <th className="text-left py-2 px-2 text-gray-500 font-medium">商品</th>
+                  <th className="text-right py-2 px-2 text-gray-500 font-medium">金额</th>
+                  <th className="text-center py-2 px-2 text-gray-500 font-medium">状态</th>
+                  <th className="text-center py-2 px-2 text-gray-500 font-medium">原因</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pendingTxns.map(txn => (
+                  <tr key={txn.id} className="border-b border-gray-50 hover:bg-gray-50">
+                    <td className="py-2 px-2 text-gray-600 whitespace-nowrap">{txn.trade_time.substring(5, 16)}</td>
+                    <td className="py-2 px-2">
+                      <span className={`text-xs px-1.5 py-0.5 rounded ${txn.source === 'wechat' ? 'bg-green-50 text-green-600' : 'bg-blue-50 text-blue-600'}`}>
+                        {sourceLabels[txn.source] || txn.source}
+                      </span>
+                    </td>
+                    <td className="py-2 px-2 text-gray-900">{txn.counterparty || '-'}</td>
+                    <td className="py-2 px-2 text-gray-500 text-xs max-w-48 truncate">{txn.product_desc || '-'}</td>
+                    <td className={`py-2 px-2 text-right font-mono font-medium ${txn.is_refund ? 'text-green-600' : 'text-gray-900'}`}>
+                      {txn.is_refund ? '+' : '-'}¥{txn.amount.toFixed(2)}
+                    </td>
+                    <td className="py-2 px-2 text-center">
+                      <span className={`text-xs px-1.5 py-0.5 rounded ${txn.reconcile_status === 'unmatched' ? 'bg-red-50 text-red-600' : 'bg-amber-50 text-amber-600'}`}>
+                        {txn.reconcile_status === 'unmatched' ? '未匹配' : '有差异'}
+                      </span>
+                    </td>
+                    <td className="py-2 px-2 text-center text-xs text-gray-400">
+                      {txn.is_refund ? '退款未找到原支付' : txn.reconcile_status === 'discrepancy' ? '退款金额有差' : '未被退款关联'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Refund Chains */}
       <div className="space-y-4">
