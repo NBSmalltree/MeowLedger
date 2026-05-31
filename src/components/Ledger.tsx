@@ -3,6 +3,19 @@ import { dataService } from '../services/data-service';
 import type { Transaction, Source, Direction, Member } from '../types/index';
 
 const sourceLabels: Record<string, string> = { wechat: '微信', alipay: '支付宝', manual: '手动' };
+type TimeRange = 'month' | 'year' | 'all' | 'custom';
+
+function getDateRange(range: TimeRange, customStart?: string, customEnd?: string) {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  switch (range) {
+    case 'month': return { start: `${y}-${String(m + 1).padStart(2, '0')}-01`, end: `${y}-${String(m + 1).padStart(2, '0')}-31` };
+    case 'year': return { start: `${y}-01-01`, end: `${y}-12-31` };
+    case 'all': return { start: '', end: '' };
+    case 'custom': return { start: customStart || '', end: customEnd || '' };
+  }
+}
 
 export function Ledger() {
   const [txns, setTxns] = useState<Transaction[]>([]);
@@ -16,18 +29,24 @@ export function Ledger() {
   const [members, setMembers] = useState<Member[]>([]);
   const [editingTxn, setEditingTxn] = useState<Transaction | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [range, setRange] = useState<TimeRange>('all');
+  const [customStart, setCustomStart] = useState(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`; });
+  const [customEnd, setCustomEnd] = useState(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-31`; });
 
   const memberMap = Object.fromEntries(members.map(m => [m.id, m]));
 
   const refresh = useCallback(async () => {
+    const { start, end } = getDateRange(range, customStart, customEnd);
     const data = await dataService.getTransactions({
       source: sourceFilter === 'all' ? undefined : sourceFilter,
       direction: dirFilter === 'all' ? undefined : (dirFilter as Direction),
       search: search || undefined,
       memberId: memberFilter === 'all' ? undefined : parseInt(memberFilter),
+      startDate: start || undefined,
+      endDate: end || undefined,
     });
     setTxns(categoryFilter === 'all' ? data : data.filter(t => t.category === categoryFilter));
-  }, [sourceFilter, dirFilter, categoryFilter, memberFilter, search]);
+  }, [sourceFilter, dirFilter, categoryFilter, memberFilter, search, range, customStart, customEnd]);
 
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => {
@@ -86,9 +105,28 @@ export function Ledger() {
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-6 flex-wrap gap-4">
         <h2 className="text-2xl font-bold text-gray-900">流水明细</h2>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Time Range */}
+          <div className="flex bg-gray-100 rounded-lg p-0.5">
+            {([['month','本月'],['year','本年'],['all','全部'],['custom','自定义']] as [TimeRange,string][]).map(([r,label]) => (
+              <button key={r} onClick={() => setRange(r)}
+                className={`px-3 py-1.5 text-sm rounded-md transition ${range === r ? 'bg-white shadow-sm font-medium text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          {range === 'custom' && (
+            <div className="flex items-center gap-2">
+              <input type="date" value={customStart} onChange={e => setCustomStart(e.target.value)}
+                className="px-2 py-1 text-sm border border-gray-200 rounded-lg" />
+              <span className="text-gray-400 text-sm">~</span>
+              <input type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)}
+                className="px-2 py-1 text-sm border border-gray-200 rounded-lg" />
+            </div>
+          )}
+          {/* Actions */}
           {selected.size > 0 && (
             <button onClick={handleBatchDelete}
               className="px-3 py-1.5 bg-red-500 text-white text-sm rounded-lg hover:bg-red-600 transition">
@@ -150,8 +188,8 @@ export function Ledger() {
       </div>
 
       {/* Table */}
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
+        <table className="w-full text-sm" style={{ minWidth: '900px' }}>
           <thead>
             <tr className="bg-gray-50 text-left text-gray-500">
               <th className="px-3 py-3 w-8">
@@ -167,7 +205,7 @@ export function Ledger() {
               <th className="px-3 py-3 font-medium">商品</th>
               <th className="px-3 py-3 font-medium w-24">支付方式</th>
               <th className="px-3 py-3 font-medium text-right w-24">金额</th>
-              <th className="px-3 py-3 font-medium w-12">状态</th>
+              <th className="px-3 py-3 font-medium w-20 whitespace-nowrap">状态</th>
               <th className="px-3 py-3 font-medium w-16">操作</th>
             </tr>
           </thead>
@@ -206,7 +244,7 @@ export function Ledger() {
                       <div className="text-xs text-amber-500">已退¥{txn.refund_amount.toFixed(2)}</div>
                     )}
                   </td>
-                  <td className="px-3 py-2.5 text-xs text-gray-400">
+                  <td className="px-3 py-2.5 text-xs text-gray-400 w-20 text-center">
                     {txn.reconcile_status === 'matched' ? '✅' : txn.reconcile_status === 'discrepancy' ? '⚠️' : txn.reconcile_status === 'unmatched' ? '❌' : '🔗'}
                   </td>
                   <td className="px-3 py-2.5">

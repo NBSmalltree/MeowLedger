@@ -277,7 +277,7 @@ function registerIpcHandlers() {
     const existingIds = new Set(refundTxns.map(t => t.id));
     const unmatchedRefunds = refundTxns.filter(t => t.is_refund === 1 && !t.reconcile_group_id);
     const newlyLinked = [];
-    const usedPaymentIds = new Set();
+    const cumulativeRefund = {};
 
     for (const refund of unmatchedRefunds) {
       let bestMatch = null;
@@ -286,18 +286,19 @@ function registerIpcHandlers() {
       const refundMId = refund.merchant_txn_id || refund.merchant_order_id || '';
       if (refundMId) {
         bestMatch = allPayments.find(t =>
-          !usedPaymentIds.has(t.id) && t.id !== refund.id &&
+          t.id !== refund.id &&
           (t.merchant_txn_id === refundMId || t.merchant_order_id === refundMId)
         ) || null;
       }
 
-      // 策略二：counterparty + 金额 + 时间窗口
+      // 策略二：counterparty + 金额（考虑已累计退款）+ 时间窗口
       if (!bestMatch && refund.counterparty) {
         const refundTime = new Date(refund.trade_time).getTime();
         const candidates = allPayments.filter(t => {
-          if (t.id === refund.id || usedPaymentIds.has(t.id)) return false;
+          if (t.id === refund.id) return false;
           if (t.counterparty !== refund.counterparty) return false;
-          if (refund.amount > t.amount) return false;
+          const alreadyRefunded = cumulativeRefund[t.id] || 0;
+          if (refund.amount > t.amount - alreadyRefunded) return false;
           const payTime = new Date(t.trade_time).getTime();
           return refundTime > payTime && (refundTime - payTime) < 30 * 86400000;
         });
@@ -315,7 +316,7 @@ function registerIpcHandlers() {
         if (clean.length > 2) {
           const refundTime = new Date(refund.trade_time).getTime();
           bestMatch = allPayments.find(t => {
-            if (t.id === refund.id || usedPaymentIds.has(t.id)) return false;
+            if (t.id === refund.id) return false;
             const pm = (t.product_desc || '').includes(clean) || (t.counterparty || '').includes(clean) || clean.includes(t.counterparty || '');
             const tm = refundTime > new Date(t.trade_time).getTime() && (refundTime - new Date(t.trade_time).getTime()) < 30 * 86400000;
             return pm && tm;
@@ -326,7 +327,7 @@ function registerIpcHandlers() {
       if (bestMatch && !existingIds.has(bestMatch.id)) {
         refundTxns.push(bestMatch);
         newlyLinked.push({ refund, payment: bestMatch });
-        usedPaymentIds.add(bestMatch.id);
+        cumulativeRefund[bestMatch.id] = (cumulativeRefund[bestMatch.id] || 0) + refund.amount;
       }
     }
 
@@ -342,24 +343,31 @@ function registerIpcHandlers() {
       @counterparty,@product_desc,@first_trade_time,@last_trade_time)
     `);
 
+    const newGroupPaymentIds = new Set();
     for (const { refund, payment } of newlyLinked) {
-      const groupId = crypto.randomUUID();
-      const netAmt = payment.amount - refund.amount;
+      const totalRefunded = cumulativeRefund[payment.id] || refund.amount;
+      const netAmt = payment.amount - totalRefunded;
       const st = netAmt <= 0.001 ? 'fully_refunded' : 'partial_refund';
+
+      // 复用原支付已有的对账组，或创建新组
+      const groupId = payment.reconcile_group_id || crypto.randomUUID();
+      if (!payment.reconcile_group_id && !newGroupPaymentIds.has(payment.id)) {
+        newGroupPaymentIds.add(payment.id);
+      }
 
       groupStmt.run({
         id: groupId, original_txn_id: payment.id, total_paid: payment.amount,
-        total_refunded: refund.amount, net_amount: netAmt, refund_count: 1, status: st,
+        total_refunded: totalRefunded, net_amount: netAmt, refund_count: 1, status: st,
         counterparty: refund.counterparty, product_desc: payment.product_desc,
         first_trade_time: payment.trade_time, last_trade_time: refund.trade_time,
       });
 
       // 更新退款记录
       updateStmt.run({ id: refund.id, rs: 'matched', rg: groupId, ra: refund.amount, na: 0 });
-      // 更新原支付记录
-      updateStmt.run({ id: payment.id, rs: st === 'fully_refunded' ? 'matched' : 'discrepancy', rg: groupId, ra: refund.amount, na: netAmt });
+      // 更新原支付记录（用累计退款总额）
+      updateStmt.run({ id: payment.id, rs: st === 'fully_refunded' ? 'matched' : 'discrepancy', rg: groupId, ra: totalRefunded, na: netAmt });
 
-      // 同步到内存中的 txn 对象，让后续链路构建用正确的 group id
+      // 同步到内存中的 txn 对象
       refund.reconcile_group_id = groupId;
       refund.reconcile_status = 'matched';
       payment.reconcile_group_id = groupId;
@@ -557,6 +565,10 @@ function registerIpcHandlers() {
     `);
 
     const runReconcile = database.transaction(() => {
+      // 跟踪每笔支付的累计退款金额和所属对账组
+      const cumulativeRefund = {};
+      const paymentGroupMap = {};
+
       for (const refund of refundTxns) {
         let bestMatch = null;
 
@@ -568,14 +580,17 @@ function registerIpcHandlers() {
           ) || null;
         }
 
-        // Strategy 2: counterparty + amount + time window
+        // Strategy 2: counterparty + amount + time window（考虑已累计退款后的剩余金额）
         if (!bestMatch && refund.counterparty) {
           const refundTime = new Date(refund.trade_time).getTime();
           const candidates = paymentTxns.filter(t => {
             if (t.id === refund.id) return false;
-            return t.counterparty === refund.counterparty && refund.amount <= t.amount &&
-              refundTime > new Date(t.trade_time).getTime() &&
-              (refundTime - new Date(t.trade_time).getTime()) < 30 * 86400000;
+            if (t.counterparty !== refund.counterparty) return false;
+            const alreadyRefunded = cumulativeRefund[t.id] || 0;
+            const remaining = t.amount - alreadyRefunded;
+            if (refund.amount > remaining) return false;
+            const payTime = new Date(t.trade_time).getTime();
+            return refundTime > payTime && (refundTime - payTime) < 30 * 86400000;
           });
           if (candidates.length > 0) {
             bestMatch = candidates.reduce((c, curr) =>
@@ -599,28 +614,33 @@ function registerIpcHandlers() {
         }
 
         if (bestMatch) {
-          const groupId = crypto.randomUUID();
-          const netAmt = bestMatch.amount - refund.amount;
+          // 累计退款
+          cumulativeRefund[bestMatch.id] = (cumulativeRefund[bestMatch.id] || 0) + refund.amount;
+          const totalRefunded = cumulativeRefund[bestMatch.id];
+          const netAmt = bestMatch.amount - totalRefunded;
           const st = netAmt <= 0.001 ? 'fully_refunded' : 'partial_refund';
+
+          // 复用已有对账组（同一笔支付的多笔退款归入同一组）
+          const groupId = paymentGroupMap[bestMatch.id] || crypto.randomUUID();
+          if (!paymentGroupMap[bestMatch.id]) {
+            paymentGroupMap[bestMatch.id] = groupId;
+            groupsCreated++;
+          }
 
           groupStmt.run({
             id: groupId, original_txn_id: bestMatch.id, total_paid: bestMatch.amount,
-            total_refunded: refund.amount, net_amount: netAmt, refund_count: 1, status: st,
+            total_refunded: totalRefunded, net_amount: netAmt, refund_count: 1, status: st,
             counterparty: refund.counterparty, product_desc: bestMatch.product_desc,
             first_trade_time: bestMatch.trade_time, last_trade_time: refund.trade_time,
           });
 
           updateStmt.run({
             id: bestMatch.id, rs: st === 'fully_refunded' ? 'matched' : 'discrepancy',
-            rg: groupId, na: netAmt, ra: refund.amount,
+            rg: groupId, na: netAmt, ra: totalRefunded,
           });
           updateStmt.run({ id: refund.id, rs: 'matched', rg: groupId, na: 0, ra: refund.amount });
 
-          const idx = paymentTxns.findIndex(t => t.id === bestMatch.id);
-          if (idx !== -1) paymentTxns.splice(idx, 1);
-
           matched++;
-          groupsCreated++;
         } else {
           updateStmt.run({ id: refund.id, rs: 'unmatched', rg: null, na: 0, ra: refund.amount });
           unmatched++;

@@ -3,30 +3,60 @@ import { dataService } from '../services/data-service';
 import type { RefundChain, Transaction, Member } from '../types/index';
 
 const sourceLabels: Record<string, string> = { wechat: '微信', alipay: '支付宝' };
+type TimeRange = 'month' | 'year' | 'all' | 'custom';
+
+function getDateRange(range: TimeRange, customStart?: string, customEnd?: string) {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  switch (range) {
+    case 'month': return { start: `${y}-${String(m + 1).padStart(2, '0')}-01`, end: `${y}-${String(m + 1).padStart(2, '0')}-31` };
+    case 'year': return { start: `${y}-01-01`, end: `${y}-12-31` };
+    case 'all': return { start: '', end: '' };
+    case 'custom': return { start: customStart || '', end: customEnd || '' };
+  }
+}
 
 export function Reconcile() {
-  const [chains, setChains] = useState<RefundChain[]>([]);
+  const [allChains, setAllChains] = useState<RefundChain[]>([]);
   const [stats, setStats] = useState<{ unmatched: number; discrepancy: number }>({ unmatched: 0, discrepancy: 0 });
   const [showPending, setShowPending] = useState(false);
   const [pendingTxns, setPendingTxns] = useState<Transaction[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
+  const [range, setRange] = useState<TimeRange>('all');
+  const [customStart, setCustomStart] = useState(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`; });
+  const [customEnd, setCustomEnd] = useState(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-31`; });
 
   const memberMap = Object.fromEntries(members.map(m => [m.id, m]));
 
+  // 根据时间范围过滤链路（链路中任一交易在范围内即显示）
+  const { start, end } = getDateRange(range, customStart, customEnd);
+  const chains = (start || end)
+    ? allChains.filter(chain =>
+        chain.items.some(item => {
+          const t = item.tradeTime.substring(0, 10);
+          return (!start || t >= start) && (!end || t <= end);
+        })
+      )
+    : allChains;
+
   useEffect(() => {
-    // getRefundChains 会自动修复未关联的记录，必须先于 getDashboardStats
     dataService.getRefundChains().then(chains => {
-      setChains(chains);
-      // 修复完成后再获取统计数据，确保一致
-      dataService.getDashboardStats().then(s => setStats({ unmatched: s.unmatchedCount, discrepancy: s.discrepancyCount }));
+      setAllChains(chains);
+      const { start: s, end: e } = getDateRange(range, customStart, customEnd);
+      dataService.getDashboardStats(s || undefined, e || undefined).then(st =>
+        setStats({ unmatched: st.unmatchedCount, discrepancy: st.discrepancyCount })
+      );
     });
     dataService.getMembers().then(setMembers);
-  }, []);
+  }, [range, customStart, customEnd]);
 
   const loadPendingTxns = async () => {
+    const { start: s, end: e } = getDateRange(range, customStart, customEnd);
+    const opts = { startDate: s || undefined, endDate: e || undefined };
     const [unmatched, discrepancy] = await Promise.all([
-      dataService.getTransactions({ reconcileStatus: 'unmatched' }),
-      dataService.getTransactions({ reconcileStatus: 'discrepancy' }),
+      dataService.getTransactions({ reconcileStatus: 'unmatched', ...opts }),
+      dataService.getTransactions({ reconcileStatus: 'discrepancy', ...opts }),
     ]);
     setPendingTxns([...unmatched, ...discrepancy].sort((a, b) => b.trade_time.localeCompare(a.trade_time)));
     setShowPending(true);
@@ -41,7 +71,28 @@ export function Reconcile() {
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
-      <h2 className="text-2xl font-bold text-gray-900">退款对账分析</h2>
+      <div className="flex items-center justify-between flex-wrap gap-4">
+        <h2 className="text-2xl font-bold text-gray-900">退款对账分析</h2>
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex bg-gray-100 rounded-lg p-0.5">
+            {([['month','本月'],['year','本年'],['all','全部'],['custom','自定义']] as [TimeRange,string][]).map(([r,label]) => (
+              <button key={r} onClick={() => setRange(r)}
+                className={`px-3 py-1.5 text-sm rounded-md transition ${range === r ? 'bg-white shadow-sm font-medium text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          {range === 'custom' && (
+            <div className="flex items-center gap-2">
+              <input type="date" value={customStart} onChange={e => setCustomStart(e.target.value)}
+                className="px-2 py-1 text-sm border border-gray-200 rounded-lg" />
+              <span className="text-gray-400 text-sm">~</span>
+              <input type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)}
+                className="px-2 py-1 text-sm border border-gray-200 rounded-lg" />
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* Summary */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
