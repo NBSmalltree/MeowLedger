@@ -1,4 +1,4 @@
-name: Build Windows Installer
+name: Build & Release
 
 on:
   push:
@@ -37,25 +37,64 @@ jobs:
           name: MeowLedger-Windows
           path: |
             release/*.exe
-            release/*.blockmap
+          retention-days: 30
+
+  build-mac:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Electron app (macOS - both architectures)
+        run: npx electron-builder --mac --publish never
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeowLedger-Mac
+          path: |
+            release/*.dmg
           retention-days: 30
 
   release:
-    needs: build-windows
+    needs: [build-windows, build-mac]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
 
     steps:
-      - name: Download artifacts
+      - name: Download Windows artifacts
         uses: actions/download-artifact@v4
         with:
           name: MeowLedger-Windows
-          path: ./release
+          path: ./release-win
+
+      - name: Download Mac artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: MeowLedger-Mac
+          path: ./release-mac
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ./release/*
+          files: |
+            ./release-win/*
+            ./release-mac/*
           generate_release_notes: true

@@ -1,6 +1,6 @@
 {
   "name": "meow-ledger",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "喵喵账本 - 家庭财务对账系统",
   "main": "electron/main.cjs",
@@ -72,7 +72,12 @@
       ]
     },
     "mac": {
-      "target": ["dmg"]
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["x64", "arm64"]
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,
